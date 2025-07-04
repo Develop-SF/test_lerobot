@@ -14,6 +14,7 @@
 
 from .act.configuration_act import ACTConfig as ACTConfig
 from .diffusion.configuration_diffusion import DiffusionConfig as DiffusionConfig
+from .mlp.configuration_mlp import MlpConfig as MlpConfig
 from .pi0.configuration_pi0 import PI0Config as PI0Config
 from .smolvla.configuration_smolvla import SmolVLAConfig as SmolVLAConfig
 from .tdmpc.configuration_tdmpc import TDMPCConfig as TDMPCConfig
