@@ -23,11 +23,14 @@ import torchvision
 from torch import Tensor
 from torchvision.models._utils import IntermediateLayerGetter
 from torchvision.ops.misc import FrozenBatchNorm2d
+import einops
+import numpy as np
 
-from lerobot.common.constants import ACTION, OBS_IMAGES, STATE
+from lerobot.common.constants import ACTION, OBS_IMAGES, OBS_STATE
 from lerobot.common.policies.mlp.configuration_mlp import MlpConfig
 from lerobot.common.policies.normalize import Normalize, Unnormalize
 from lerobot.common.policies.pretrained import PreTrainedPolicy
+from lerobot.common.policies.utils import populate_queues, get_output_shape
 
 
 class MlpPolicy(PreTrainedPolicy):
@@ -59,42 +62,46 @@ class MlpPolicy(PreTrainedPolicy):
         self.reset()
 
     def get_optim_params(self) -> dict:
-        return [
-            {
-                "params": [
-                    p
-                    for n, p in self.named_parameters()
-                    if not n.startswith("model.backbone") and p.requires_grad
-                ]
-            },
-            {
-                "params": [
-                    p
-                    for n, p in self.named_parameters()
-                    if n.startswith("model.backbone") and p.requires_grad
-                ],
-                "lr": self.config.optimizer_lr_backbone,
-            },
-        ]
+        return self.model.parameters()
 
     def reset(self):
         """This should be called whenever the environment is reset."""
-        self._action_queue = deque([], maxlen=self.config.n_action_steps)
+        queues = {
+            "action": deque(maxlen=self.config.n_action_steps),
+        }
+        if self.config.robot_state_feature:
+            queues[OBS_STATE] = deque(maxlen=self.config.n_obs_steps)
+        if self.config.image_features:
+            # We use a single queue for all images for simplicity.
+            # During processing, this will be expanded into a list of tensors, one for each camera.
+            queues[OBS_IMAGES] = deque(maxlen=self.config.n_obs_steps)
+        self._queues = queues
 
     @torch.no_grad
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
         self.eval()
 
-        if len(self._action_queue) == 0:
-            actions = self.predict_action_chunk(batch)
-            self._action_queue.extend(actions.transpose(0, 1))
-        return self._action_queue.popleft()
+        # Add image features to a single key for queueing.
+        batch = self.normalize_inputs(batch)
+        if self.config.image_features:
+            batch = dict(batch)
+            batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
+
+        self._queues = populate_queues(self._queues, batch)
+
+        if len(self._queues["action"]) == 0:
+            actions = self.predict_action_chunk()
+            self._queues["action"].extend(actions.transpose(0, 1))
+        return self._queues["action"].popleft()
 
     @torch.no_grad
-    def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
+    def predict_action_chunk(self) -> Tensor:
         self.eval()
 
-        batch = self.normalize_inputs(batch)
+        batch = {}
+        if self.config.robot_state_feature:
+            batch[OBS_STATE] = torch.stack(list(self._queues[OBS_STATE]), dim=1)
+
         if self.config.image_features:
             batch = dict(batch)  # shallow copy
             batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
@@ -106,8 +113,14 @@ class MlpPolicy(PreTrainedPolicy):
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
         batch = self.normalize_inputs(batch)
         if self.config.image_features:
-            batch = dict(batch)  # shallow copy
-            batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
+            batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
+            images = []
+            for key in self.config.image_features:
+                img = batch[key]
+                if img.ndim == 4:  # (B, C, H, W) for n_obs_steps=1
+                    img = img.unsqueeze(1)  # (B, 1, C, H, W)
+                images.append(img)
+            batch[OBS_IMAGES] = torch.stack(images, dim=-4)  # (B, n_obs, num_cameras, C, H, W)
 
         batch = self.normalize_targets(batch)
         actions_hat = self.model(batch)
@@ -119,16 +132,79 @@ class MlpPolicy(PreTrainedPolicy):
         return loss, loss_dict
 
 
+class SpatialSoftmax(nn.Module):
+    """
+    Spatial Soft Argmax operation described in "Deep Spatial Autoencoders for Visuomotor Learning" by Finn et al.
+    """
+    def __init__(self, input_shape, num_kp=None):
+        super().__init__()
+        assert len(input_shape) == 3
+        self._in_c, self._in_h, self._in_w = input_shape
+        if num_kp is not None:
+            self.nets = torch.nn.Conv2d(self._in_c, num_kp, kernel_size=1)
+            self._out_c = num_kp
+        else:
+            self.nets = None
+            self._out_c = self._in_c
+        pos_x, pos_y = np.meshgrid(np.linspace(-1.0, 1.0, self._in_w), np.linspace(-1.0, 1.0, self._in_h))
+        pos_x = torch.from_numpy(pos_x.reshape(self._in_h * self._in_w, 1)).float()
+        pos_y = torch.from_numpy(pos_y.reshape(self._in_h * self._in_w, 1)).float()
+        self.register_buffer("pos_grid", torch.cat([pos_x, pos_y], dim=1))
+    def forward(self, features: Tensor) -> Tensor:
+        if self.nets is not None:
+            features = self.nets(features)
+        features = features.reshape(-1, self._in_h * self._in_w)
+        attention = F.softmax(features, dim=-1)
+        expected_xy = attention @ self.pos_grid
+        feature_keypoints = expected_xy.view(-1, self._out_c, 2)
+        return feature_keypoints
+
+class MlpRgbEncoder(nn.Module):
+    """Encodes an RGB image into a 1D feature vector. Logic copied from DiffusionRgbEncoder."""
+    def __init__(self, config):
+        super().__init__()
+        if config.crop_shape is not None:
+            self.do_crop = True
+            self.center_crop = torchvision.transforms.CenterCrop(config.crop_shape)
+            if getattr(config, 'crop_is_random', False):
+                self.maybe_random_crop = torchvision.transforms.RandomCrop(config.crop_shape)
+            else:
+                self.maybe_random_crop = self.center_crop
+        else:
+            self.do_crop = False
+        backbone_model = getattr(torchvision.models, config.vision_backbone)(
+            weights=config.pretrained_backbone_weights
+        )
+        self.backbone = nn.Sequential(*(list(backbone_model.children())[:-2]))
+        # No group norm logic for now (add if needed)
+        images_shape = next(iter(config.image_features.values())).shape
+        dummy_shape_h_w = config.crop_shape if config.crop_shape is not None else images_shape[1:]
+        dummy_shape = (1, images_shape[0], *dummy_shape_h_w)
+        feature_map_shape = get_output_shape(self.backbone, dummy_shape)[1:]
+        self.pool = SpatialSoftmax(feature_map_shape, num_kp=getattr(config, 'spatial_softmax_num_keypoints', 32))
+        self.feature_dim = getattr(config, 'spatial_softmax_num_keypoints', 32) * 2
+        self.out = nn.Linear(self.feature_dim, self.feature_dim)
+        self.relu = nn.ReLU()
+    def forward(self, x: Tensor) -> Tensor:
+        if self.do_crop:
+            if self.training:
+                x = self.maybe_random_crop(x)
+            else:
+                x = self.center_crop(x)
+        x = torch.flatten(self.pool(self.backbone(x)), start_dim=1)
+        x = self.relu(self.out(x))
+        return x
+
 class MLP(nn.Module):
     def __init__(self, config: MlpConfig):
         super().__init__()
         self.config = config
 
         # Instantiate state feature extractor
-        if config.state_feature:
+        if config.robot_state_feature:
             self.state_feature_extractor = nn.Sequential(
                 nn.Linear(
-                    config.state_feature.shape[0] * self.config.n_obs_steps,
+                    config.robot_state_feature.shape[0] * self.config.n_obs_steps,
                     config.state_feature_dim,
                 ),
                 nn.ReLU(),
@@ -136,18 +212,20 @@ class MLP(nn.Module):
 
         # Instantiate image feature extractor
         if config.image_features:
-            vision_backbone = getattr(torchvision.models, config.vision_backbone)
-            backbone_model = vision_backbone(
-                weights=config.pretrained_backbone_weights, norm_layer=FrozenBatchNorm2d
-            )
-            self.backbone = nn.Sequential(*list(backbone_model.children())[:-1])
-            image_feature_dim = backbone_model.fc.in_features
+            num_images = len(config.image_features)
+            if getattr(config, 'use_separate_rgb_encoder_per_camera', False):
+                encoders = [MlpRgbEncoder(config) for _ in range(num_images)]
+                self.rgb_encoder = nn.ModuleList(encoders)
+                image_feature_dim = encoders[0].feature_dim * num_images
+            else:
+                self.rgb_encoder = MlpRgbEncoder(config)
+                image_feature_dim = self.rgb_encoder.feature_dim * num_images
         else:
             image_feature_dim = 0
 
         # Instantiate linear layers
         combined_feature_dim = (
-            config.state_feature_dim if config.state_feature else 0
+            config.state_feature_dim if config.robot_state_feature else 0
         ) + len(config.image_features) * config.n_obs_steps * image_feature_dim
 
         linear_dim_list = (
@@ -176,8 +254,8 @@ class MLP(nn.Module):
     def forward(self, batch: dict[str, Tensor]):
         # Extract state features
         state_feature = None
-        if self.config.state_feature:
-            state_seq = batch[STATE]
+        if self.config.robot_state_feature:
+            state_seq = batch[OBS_STATE]
             # Assumes state_seq has shape (batch, n_obs_steps, state_dim)
             state_seq = state_seq.reshape(state_seq.shape[0], -1)
             state_feature = self.state_feature_extractor(state_seq)
@@ -185,16 +263,29 @@ class MLP(nn.Module):
         # Extract image features
         image_features = None
         if self.config.image_features:
-            images_seq = batch[OBS_IMAGES]  # List of (B, n_obs, C, H, W)
-            # Reshape to (B, num_images * n_obs, C, H, W)
-            images_seq_cat = torch.cat(images_seq, dim=1)
-            batch_size, num_obs_total, C, H, W = images_seq_cat.shape
-            images_seq_flat = images_seq_cat.reshape(batch_size * num_obs_total, C, H, W)
-            
-            image_features_flat = self.backbone(images_seq_flat)
-            image_features = image_features_flat.reshape(batch_size, num_obs_total, -1)
-            image_features = image_features.reshape(batch_size, -1)
-
+            images_seq = batch[OBS_IMAGES]  # (B, n_obs, num_cameras, C, H, W)
+            batch_size, n_obs, num_cameras, C, H, W = images_seq.shape
+            if getattr(self.config, 'use_separate_rgb_encoder_per_camera', False):
+                # For each camera, process all (B, n_obs, C, H, W) with its encoder
+                images_per_camera = einops.rearrange(images_seq, 'b s n c h w -> n (b s) c h w')
+                img_features_list = [
+                    encoder(images)
+                    for encoder, images in zip(self.rgb_encoder, images_per_camera, strict=True)
+                ]
+                # (num_cameras, B*n_obs, D) -> (B, n_obs, num_cameras*D)
+                img_features = torch.cat(img_features_list)
+                img_features = einops.rearrange(
+                    img_features, '(n b s) d -> b s (n d)', n=num_cameras, b=batch_size, s=n_obs
+                )
+            else:
+                # Shared encoder: flatten batch, obs, camera
+                images_flat = einops.rearrange(images_seq, 'b s n c h w -> (b s n) c h w')
+                img_features = self.rgb_encoder(images_flat)
+                # (B*n_obs*num_cameras, D) -> (B, n_obs, num_cameras*D)
+                img_features = einops.rearrange(
+                    img_features, '(b s n) d -> b s (n d)', b=batch_size, s=n_obs, n=num_cameras
+                )
+            image_features = img_features.reshape(batch_size, -1)
 
         # Concatenate features
         if state_feature is not None and image_features is not None:
