@@ -16,9 +16,10 @@
 from dataclasses import dataclass, field
 from typing import List
 
-from lerobot.common.optim.optimizers import AdamWConfig
+from lerobot.common.optim.optimizers import AdamConfig
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import NormalizationMode
+from lerobot.common.optim.schedulers import MLPSchedulerConfig
 
 
 @PreTrainedConfig.register_subclass("mlp")
@@ -36,17 +37,17 @@ class MlpConfig(PreTrainedConfig):
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
             "VISUAL": NormalizationMode.MEAN_STD,
-            "STATE": NormalizationMode.MEAN_STD,
-            "ACTION": NormalizationMode.MEAN_STD,
+            "STATE": NormalizationMode.MIN_MAX,
+            "ACTION": NormalizationMode.MIN_MAX,
         }
     )
 
     # Architecture.
     # Vision backbone.
     vision_backbone: str = "resnet18"
-    pretrained_backbone_weights: str | None = "ResNet18_Weights.DEFAULT"
-    crop_shape: tuple[int, int] | None = None
-    crop_is_random: bool = False
+    pretrained_backbone_weights: str | None = None
+    crop_shape: tuple[int, int] | None = (84, 84)
+    crop_is_random: bool = True
     spatial_softmax_num_keypoints: int = 32
     # MLP head
     hidden_dim_list: List[int] = field(default_factory=lambda: [512, 512, 512])
@@ -57,8 +58,11 @@ class MlpConfig(PreTrainedConfig):
 
     # Training preset
     optimizer_lr: float = 1e-4
-    optimizer_weight_decay: float = 1e-4
-    optimizer_lr_backbone: float = 1e-5
+    optimizer_betas: tuple = (0.95, 0.999)
+    optimizer_eps: float = 1e-8
+    optimizer_weight_decay: float = 1e-6
+    scheduler_name: str = "cosine"
+    scheduler_warmup_steps: int = 500
 
     def __post_init__(self):
         super().__post_init__()
@@ -76,14 +80,19 @@ class MlpConfig(PreTrainedConfig):
                     f"`{key}` does not match `{first_image_key}`, but we expect all image shapes to match."
                 )
 
-    def get_optimizer_preset(self) -> AdamWConfig:
-        return AdamWConfig(
+    def get_optimizer_preset(self) -> AdamConfig:
+        return AdamConfig(
             lr=self.optimizer_lr,
+            betas=self.optimizer_betas,
+            eps=self.optimizer_eps,
             weight_decay=self.optimizer_weight_decay,
         )
 
-    def get_scheduler_preset(self) -> None:
-        return None
+    def get_scheduler_preset(self) -> MLPSchedulerConfig:
+        return MLPSchedulerConfig(
+            name=self.scheduler_name,
+            num_warmup_steps=self.scheduler_warmup_steps,
+        )
 
     def validate_features(self) -> None:
         if not self.image_features and not self.robot_state_feature:

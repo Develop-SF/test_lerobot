@@ -53,6 +53,19 @@ class DiffuserSchedulerConfig(LRSchedulerConfig):
         return get_scheduler(**kwargs)
 
 
+@LRSchedulerConfig.register_subclass("mlp")
+@dataclass
+class MLPSchedulerConfig(LRSchedulerConfig):
+    name: str = "cosine"
+    num_warmup_steps: int | None = None
+
+    def build(self, optimizer: Optimizer, num_training_steps: int) -> LambdaLR:
+        from diffusers.optimization import get_scheduler
+
+        kwargs = {**asdict(self), "num_training_steps": num_training_steps, "optimizer": optimizer}
+        return get_scheduler(**kwargs)
+
+
 @LRSchedulerConfig.register_subclass("vqbet")
 @dataclass
 class VQBeTSchedulerConfig(LRSchedulerConfig):
