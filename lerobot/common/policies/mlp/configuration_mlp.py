@@ -24,7 +24,7 @@ from lerobot.common.optim.schedulers import MLPSchedulerConfig
 
 @PreTrainedConfig.register_subclass("mlp")
 @dataclass
-class MlpConfig(PreTrainedConfig):
+class MLPConfig(PreTrainedConfig):
     """
     Configuration class for a simple MLP policy.
     """

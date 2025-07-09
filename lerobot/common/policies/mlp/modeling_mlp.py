@@ -27,23 +27,23 @@ import einops
 import numpy as np
 
 from lerobot.common.constants import ACTION, OBS_IMAGES, OBS_STATE
-from lerobot.common.policies.mlp.configuration_mlp import MlpConfig
+from lerobot.common.policies.mlp.configuration_mlp import MLPConfig
 from lerobot.common.policies.normalize import Normalize, Unnormalize
 from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.utils import populate_queues, get_output_shape
 
 
-class MlpPolicy(PreTrainedPolicy):
+class MLPPolicy(PreTrainedPolicy):
     """
     MLP policy with ResNet backbone.
     """
 
-    config_class = MlpConfig
+    config_class = MLPConfig
     name = "mlp"
 
     def __init__(
         self,
-        config: MlpConfig,
+        config: MLPConfig,
         dataset_stats: dict[str, dict[str, Tensor]] | None = None,
     ):
         super().__init__(config)
@@ -89,29 +89,25 @@ class MlpPolicy(PreTrainedPolicy):
 
         self._queues = populate_queues(self._queues, batch)
 
-        if len(self._queues["action"]) == 0:
-            actions = self.predict_action_chunk()
-            self._queues["action"].extend(actions.transpose(0, 1))
-        return self._queues["action"].popleft()
+        if len(self._queues[ACTION]) == 0:
+            actions = self.predict_action_chunk(batch)
+            self._queues[ACTION].extend(actions.transpose(0, 1))
+
+        action = self._queues[ACTION].popleft()
+        return action
 
     @torch.no_grad
-    def predict_action_chunk(self) -> Tensor:
+    def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
         self.eval()
 
-        batch = {}
-        if self.config.robot_state_feature:
-            batch[OBS_STATE] = torch.stack(list(self._queues[OBS_STATE]), dim=1)
-
-        if self.config.image_features:
-            batch = dict(batch)  # shallow copy
-            batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
-
+        # during queues init, whether a key is used is already checked (using state or image)
+        batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
         actions = self.model(batch)
         actions = self.unnormalize_outputs({ACTION: actions})[ACTION]
         return actions
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
-        batch = self.normalize_inputs(batch)
+        batch = self.normalize_inputs(batch) 
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             images = []
@@ -159,7 +155,7 @@ class SpatialSoftmax(nn.Module):
         feature_keypoints = expected_xy.view(-1, self._out_c, 2)
         return feature_keypoints
 
-class MlpRgbEncoder(nn.Module):
+class MLPRgbEncoder(nn.Module):
     """Encodes an RGB image into a 1D feature vector. Logic copied from DiffusionRgbEncoder."""
     def __init__(self, config):
         super().__init__()
@@ -196,7 +192,7 @@ class MlpRgbEncoder(nn.Module):
         return x
 
 class MLP(nn.Module):
-    def __init__(self, config: MlpConfig):
+    def __init__(self, config: MLPConfig):
         super().__init__()
         self.config = config
 
@@ -214,11 +210,11 @@ class MLP(nn.Module):
         if config.image_features:
             num_images = len(config.image_features)
             if getattr(config, 'use_separate_rgb_encoder_per_camera', False):
-                encoders = [MlpRgbEncoder(config) for _ in range(num_images)]
+                encoders = [MLPRgbEncoder(config) for _ in range(num_images)]
                 self.rgb_encoder = nn.ModuleList(encoders)
                 image_feature_dim = encoders[0].feature_dim * num_images
             else:
-                self.rgb_encoder = MlpRgbEncoder(config)
+                self.rgb_encoder = MLPRgbEncoder(config)
                 image_feature_dim = self.rgb_encoder.feature_dim * num_images
         else:
             image_feature_dim = 0
