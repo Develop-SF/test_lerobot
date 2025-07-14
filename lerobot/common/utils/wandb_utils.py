@@ -33,7 +33,7 @@ def cfg_to_group(cfg: TrainPipelineConfig, return_list: bool = False) -> list[st
         f"seed:{cfg.seed}",
     ]
     if cfg.dataset is not None:
-        lst.append(f"dataset:{cfg.dataset.repo_id}")
+        lst.append(f"dataset:emily_right_sim_approach")
     if cfg.env is not None:
         lst.append(f"env:{cfg.env.type}")
     return lst if return_list else "-".join(lst)
@@ -109,7 +109,7 @@ class WandBLogger:
             return
 
         step_id = checkpoint_dir.name
-        artifact_name = f"{self._group}-{step_id}"
+        artifact_name = f"policy_diffusion-seed_100000-dataset_emily_right_sim_approach-{step_id}"
         artifact_name = get_safe_wandb_artifact_name(artifact_name)
         artifact = self._wandb.Artifact(artifact_name, type="model")
         artifact.add_file(checkpoint_dir / PRETRAINED_MODEL_DIR / SAFETENSORS_SINGLE_FILE)
