@@ -43,6 +43,11 @@ from lerobot.common.policies.utils import (
     get_output_shape,
     populate_queues,
 )
+from lerobot.common.utils.relative_actions import (
+    convert_actions_to_absolute,
+    convert_observation_state_to_relative,
+    get_current_arm_state,
+)
 
 
 class DiffusionPolicy(PreTrainedPolicy):
@@ -58,6 +63,8 @@ class DiffusionPolicy(PreTrainedPolicy):
         self,
         config: DiffusionConfig,
         dataset_stats: dict[str, dict[str, Tensor]] | None = None,
+        use_relative_actions: bool = False,
+        arm_dim: int = 6,
     ):
         """
         Args:
@@ -65,10 +72,17 @@ class DiffusionPolicy(PreTrainedPolicy):
                 the configuration class is used.
             dataset_stats: Dataset statistics to be used for normalization. If not passed here, it is expected
                 that they will be passed with a call to `load_state_dict` before the policy is used.
+            use_relative_actions: If True, converts observations to relative during inference and predicted
+                actions back to absolute. Should match the training mode.
+            arm_dim: Number of arm joints (excluding gripper). Used for relative action conversion.
         """
         super().__init__(config)
         config.validate_features()
         self.config = config
+        
+        # Relative action configuration
+        self.use_relative_actions = use_relative_actions
+        self.arm_dim = arm_dim
 
         self.normalize_inputs = Normalize(config.input_features, config.normalization_mapping, dataset_stats)
         self.normalize_targets = Normalize(
@@ -91,9 +105,10 @@ class DiffusionPolicy(PreTrainedPolicy):
     def reset(self):
         """Clear observation and action queues. Should be called on `env.reset()`"""
         self._queues = {
-            "observation.state": deque(maxlen=self.config.n_obs_steps),
             "action": deque(maxlen=self.config.n_action_steps),
         }
+        if self.config.robot_state_feature:
+            self._queues["observation.state"] = deque(maxlen=self.config.n_obs_steps)
         if self.config.image_features:
             self._queues["observation.images"] = deque(maxlen=self.config.n_obs_steps)
         if self.config.env_state_feature:
@@ -132,16 +147,93 @@ class DiffusionPolicy(PreTrainedPolicy):
         Note that this means we require: `n_action_steps <= horizon - n_obs_steps + 1`. Also, note that
         "horizon" may not the best name to describe what the variable actually means, because this period is
         actually measured from the first observation which (if `n_obs_steps` > 1) happened in the past.
+        
+        If use_relative_actions is True (FIXED to match training pipeline):
+          - Queue stores absolute observations (UNNORMALIZED)
+          - When generating actions:
+            1. Stack absolute observations from queue
+            2. Convert stacked observations to relative (PD2.2) ← BEFORE normalization
+            3. Normalize the relative observations ← MATCHES TRAINING
+            4. Feed normalized relative observations to model
+          - Policy predicts relative actions (PD2.1)
+          - Convert predicted actions back to absolute for execution
         """
-        batch = self.normalize_inputs(batch)
+        # Handle relative action mode: save absolute current state before any processing
+        current_arm_state_abs = None
+        if self.use_relative_actions and OBS_STATE in batch:
+            # Extract absolute current arm state before any transformation
+            # This will be used to convert predicted relative actions to absolute
+            obs_state_raw = batch[OBS_STATE]
+            if obs_state_raw.ndim == 1:
+                # Single observation: (state_dim,)
+                current_arm_state_abs = obs_state_raw[:self.arm_dim].clone()
+            else:
+                # Batched observation: (B, state_dim)
+                current_arm_state_abs = obs_state_raw[:, :self.arm_dim].clone()
+        
+        # CRITICAL FIX: Handle normalization carefully
+        # 1. Images MUST be normalized before stacking (because Normalize works on individual keys)
+        # 2. State MUST be kept unnormalized for relative mode (to allow relative conversion)
+        
+        if self.use_relative_actions:
+            # Relative mode: Normalize ONLY images, keep state unnormalized
+            # Create a dict with everything EXCEPT state to avoid normalizing state
+            batch_no_state = {k: v for k, v in batch.items() if k != OBS_STATE}
+            batch_normalized = self.normalize_inputs(batch_no_state)
+            # Update batch with normalized values (images, env_state, etc.)
+            batch.update(batch_normalized)
+            # State in 'batch' remains unnormalized
+        else:
+            # Absolute mode: Normalize everything
+            batch = self.normalize_inputs(batch)
+        
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
-        # Note: It's important that this happens after stacking the images into a single key.
+        
+        # Populate queues
+        # Relative mode: Queue contains NORMALIZED images, UNNORMALIZED state
+        # Absolute mode: Queue contains NORMALIZED everything
         self._queues = populate_queues(self._queues, batch)
 
         if len(self._queues[ACTION]) == 0:
-            actions = self.predict_action_chunk(batch)
+            # Stack observations from queue for model input
+            batch_for_model = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
+            
+            # Process observations before feeding to model
+            if self.use_relative_actions:
+                # Relative mode:
+                # 1. Images are ALREADY normalized (from queue)
+                # 2. State is UNNORMALIZED (from queue) -> Convert to relative -> Normalize
+                
+                if OBS_STATE in batch_for_model:
+                    # Step 1: Convert state to relative
+                    batch_for_model[OBS_STATE] = convert_observation_state_to_relative(
+                        batch_for_model[OBS_STATE],
+                        arm_dim=self.arm_dim
+                    )
+                    # Step 2: Normalize the relative state
+                    # We only want to normalize the state key
+                    state_only = {OBS_STATE: batch_for_model[OBS_STATE]}
+                    state_normalized = self.normalize_inputs(state_only)
+                    batch_for_model[OBS_STATE] = state_normalized[OBS_STATE]
+            
+            # Note: In absolute mode, everything is already normalized from the queue
+            
+            actions = self.diffusion.generate_actions(batch_for_model)
+            
+            # TODO(rcadene): make above methods return output dictionary?
+            actions = self.unnormalize_outputs({ACTION: actions})[ACTION]
+            
+            # Convert relative actions to absolute if in relative action mode (PD2.1)
+            if self.use_relative_actions and current_arm_state_abs is not None:
+                actions = convert_actions_to_absolute(
+                    actions,
+                    current_arm_state_abs,
+                    obs_horizon=self.config.n_obs_steps,
+                    arm_dim=self.arm_dim,
+                )
+            
             self._queues[ACTION].extend(actions.transpose(0, 1))
 
         action = self._queues[ACTION].popleft()
@@ -178,7 +270,9 @@ class DiffusionModel(nn.Module):
         self.config = config
 
         # Build observation encoders (depending on which observations are provided).
-        global_cond_dim = self.config.robot_state_feature.shape[0]
+        global_cond_dim = 0
+        if self.config.robot_state_feature:
+            global_cond_dim += self.config.robot_state_feature.shape[0]
         if self.config.image_features:
             num_images = len(self.config.image_features)
             if self.config.use_separate_rgb_encoder_per_camera:
@@ -240,8 +334,22 @@ class DiffusionModel(nn.Module):
 
     def _prepare_global_conditioning(self, batch: dict[str, Tensor]) -> Tensor:
         """Encode image features and concatenate them all together along with the state vector."""
-        batch_size, n_obs_steps = batch[OBS_STATE].shape[:2]
-        global_cond_feats = [batch[OBS_STATE]]
+        # Determine batch size and n_obs_steps from any available observation
+        if OBS_STATE in batch:
+            batch_size, n_obs_steps = batch[OBS_STATE].shape[:2]
+        elif "observation.images" in batch:
+            batch_size, n_obs_steps = batch["observation.images"].shape[:2]
+        elif OBS_ENV_STATE in batch:
+            batch_size, n_obs_steps = batch[OBS_ENV_STATE].shape[:2]
+        else:
+            raise ValueError("No valid observation found in batch")
+        
+        global_cond_feats = []
+        
+        # Add robot state if available
+        if self.config.robot_state_feature and OBS_STATE in batch:
+            global_cond_feats.append(batch[OBS_STATE])
+        
         # Extract image features.
         if self.config.image_features:
             if self.config.use_separate_rgb_encoder_per_camera:
@@ -274,20 +382,31 @@ class DiffusionModel(nn.Module):
             global_cond_feats.append(batch[OBS_ENV_STATE])
 
         # Concatenate features then flatten to (B, global_cond_dim).
+        if not global_cond_feats:
+            raise ValueError("No conditioning features available")
         return torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1)
 
     def generate_actions(self, batch: dict[str, Tensor]) -> Tensor:
         """
-        This function expects `batch` to have:
+        This function expects `batch` to have one or more of:
         {
-            "observation.state": (B, n_obs_steps, state_dim)
+            "observation.state": (B, n_obs_steps, state_dim) [OPTIONAL]
 
             "observation.images": (B, n_obs_steps, num_cameras, C, H, W)
                 AND/OR
             "observation.environment_state": (B, environment_dim)
         }
         """
-        batch_size, n_obs_steps = batch["observation.state"].shape[:2]
+        # Determine batch size and n_obs_steps from any available observation
+        if "observation.state" in batch:
+            batch_size, n_obs_steps = batch["observation.state"].shape[:2]
+        elif "observation.images" in batch:
+            batch_size, n_obs_steps = batch["observation.images"].shape[:2]
+        elif "observation.environment_state" in batch:
+            batch_size, n_obs_steps = batch["observation.environment_state"].shape[:2]
+        else:
+            raise ValueError("No valid observation found in batch")
+            
         assert n_obs_steps == self.config.n_obs_steps
 
         # Encode image features and concatenate them all together along with the state vector.
@@ -305,9 +424,9 @@ class DiffusionModel(nn.Module):
 
     def compute_loss(self, batch: dict[str, Tensor]) -> Tensor:
         """
-        This function expects `batch` to have (at least):
+        This function expects `batch` to have:
         {
-            "observation.state": (B, n_obs_steps, state_dim)
+            "observation.state": (B, n_obs_steps, state_dim) [OPTIONAL]
 
             "observation.images": (B, n_obs_steps, num_cameras, C, H, W)
                 AND/OR
@@ -318,9 +437,23 @@ class DiffusionModel(nn.Module):
         }
         """
         # Input validation.
-        assert set(batch).issuperset({"observation.state", "action", "action_is_pad"})
-        assert "observation.images" in batch or "observation.environment_state" in batch
-        n_obs_steps = batch["observation.state"].shape[1]
+        required_keys = {"action", "action_is_pad"}
+        assert set(batch).issuperset(required_keys)
+        # Ensure at least one observation type is present
+        has_state = "observation.state" in batch
+        has_images = "observation.images" in batch
+        has_env_state = "observation.environment_state" in batch
+        if not (has_state or has_images or has_env_state):
+            raise ValueError("At least one of 'observation.state', 'observation.images', or 'observation.environment_state' must be present")
+        
+        # Get dimensions from any available observation
+        if has_state:
+            n_obs_steps = batch["observation.state"].shape[1]
+        elif has_images:
+            n_obs_steps = batch["observation.images"].shape[1]
+        elif has_env_state:
+            n_obs_steps = batch["observation.environment_state"].shape[1]
+        
         horizon = batch["action"].shape[1]
         assert horizon == self.config.horizon
         assert n_obs_steps == self.config.n_obs_steps

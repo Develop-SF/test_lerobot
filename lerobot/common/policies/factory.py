@@ -112,6 +112,7 @@ def make_policy(
     cfg: PreTrainedConfig,
     ds_meta: LeRobotDatasetMetadata | None = None,
     env_cfg: EnvConfig | None = None,
+    **policy_kwargs,
 ) -> PreTrainedPolicy:
     """Make an instance of a policy class.
 
@@ -125,6 +126,7 @@ def make_policy(
             statistics to use for (un)normalization of inputs/outputs in the policy. Defaults to None.
         env_cfg (EnvConfig | None, optional): The config of a gym environment to parse features from. Must be
             provided if ds_meta is not. Defaults to None.
+        **policy_kwargs: Additional keyword arguments to pass to the policy constructor (e.g., use_relative_actions, arm_dim).
 
     Raises:
         ValueError: Either ds_meta or env and env_cfg must be provided.
@@ -167,6 +169,9 @@ def make_policy(
     cfg.output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
     cfg.input_features = {key: ft for key, ft in features.items() if key not in cfg.output_features}
     kwargs["config"] = cfg
+    
+    # Add any additional policy-specific kwargs
+    kwargs.update(policy_kwargs)
 
     if cfg.pretrained_path:
         # Load a pretrained policy and override the config if needed (for example, if there are inference-time

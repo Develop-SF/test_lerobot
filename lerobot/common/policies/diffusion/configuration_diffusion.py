@@ -33,7 +33,7 @@ class DiffusionConfig(PreTrainedConfig):
     Those are: `input_shapes` and `output_shapes`.
 
     Notes on the inputs and outputs:
-        - "observation.state" is required as an input key.
+        - "observation.state" is optional as an input key. If not provided, the policy will work with visual-only inputs.
         - Either:
             - At least one key starting with "observation.image is required as an input.
               AND/OR
@@ -204,8 +204,11 @@ class DiffusionConfig(PreTrainedConfig):
         )
 
     def validate_features(self) -> None:
-        if len(self.image_features) == 0 and self.env_state_feature is None:
-            raise ValueError("You must provide at least one image or the environment state among the inputs.")
+        # Ensure at least one conditioning input is available
+        if (len(self.image_features) == 0 and 
+            self.env_state_feature is None and 
+            self.robot_state_feature is None):
+            raise ValueError("You must provide at least one of: image features, environment state, or robot state.")
 
         if self.crop_shape is not None:
             for key, image_ft in self.image_features.items():
@@ -216,13 +219,14 @@ class DiffusionConfig(PreTrainedConfig):
                         f"`{key}`."
                     )
 
-        # Check that all input images have the same shape.
-        first_image_key, first_image_ft = next(iter(self.image_features.items()))
-        for key, image_ft in self.image_features.items():
-            if image_ft.shape != first_image_ft.shape:
-                raise ValueError(
-                    f"`{key}` does not match `{first_image_key}`, but we expect all image shapes to match."
-                )
+        # Check that all input images have the same shape (only if there are image features).
+        if len(self.image_features) > 0:
+            first_image_key, first_image_ft = next(iter(self.image_features.items()))
+            for key, image_ft in self.image_features.items():
+                if image_ft.shape != first_image_ft.shape:
+                    raise ValueError(
+                        f"`{key}` does not match `{first_image_key}`, but we expect all image shapes to match."
+                    )
 
     @property
     def observation_delta_indices(self) -> list:
