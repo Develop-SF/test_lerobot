@@ -16,6 +16,8 @@ import time
 import threading
 import argparse
 import json
+import datetime
+import os
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple
 from collections import deque
@@ -39,7 +41,7 @@ from std_msgs.msg import Header
 class ONNXTensorRTInference:
     """ONNX Runtime with TensorRT backend inference for Approach Real Bing 20Hz model (Absolute)."""
     
-    def __init__(self, checkpoint_path: str, onnx_dir: str, device: str = "cuda"):
+    def __init__(self, checkpoint_path: str, onnx_dir: str, device: str = "cuda", debug_dir: Optional[Path] = None):
         """
         Initialize the ONNX+TensorRT inference system.
         
@@ -51,6 +53,8 @@ class ONNXTensorRTInference:
         self.device = device
         self.checkpoint_path = Path(checkpoint_path)
         self.onnx_dir = Path(onnx_dir)
+        self.debug_dir = debug_dir
+        self.debug_step = 0
         
         # Load ONNX configuration
         config_path = self.onnx_dir / "onnx_config.json"
@@ -468,77 +472,136 @@ class ONNXTensorRTInference:
             state_list = state_list[-self.config['n_obs_steps']:]
             images_list = images_list[-self.config['n_obs_steps']:]
             
-            # Create batches: (1, n_obs_steps, ...)
+            # Create batch (1, n_obs_steps, ...)
             state_batch = np.stack(state_list, axis=0)[np.newaxis, ...]
             images_batch = np.stack(images_list, axis=0)[np.newaxis, ...]
             
-            batch_size = 1
-            n_obs_steps = state_batch.shape[1]
-            
-            # Encode images
-            batch_size, n_obs_steps, n_cameras, C, H, W = images_batch.shape
-            images_reshaped = images_batch.reshape(batch_size * n_obs_steps, n_cameras, C, H, W)
-            features_reshaped = self._encode_images(images_reshaped)
-            img_features = features_reshaped.reshape(batch_size, n_obs_steps, -1)
-            
-            # Prepare global conditioning
-            global_cond_unflat = np.concatenate([state_batch, img_features], axis=2)
-            global_cond = global_cond_unflat.reshape(batch_size, -1).astype(np.float32)
-            
-            # Initialize noise
-            noise = np.random.randn(
-                batch_size,
-                self.config['horizon'],
-                self.config['action_dim']
-            ).astype(np.float32)
-            
-            # Denoising loop
-            sample = noise.copy()
-            
-            # Set timesteps if not already set by external scheduler management
-            # Use configured inference steps if available, otherwise train steps
-            num_inference_steps = self.config.get('num_inference_steps', self.config['num_train_timesteps'])
-            self.noise_scheduler.set_timesteps(num_inference_steps)
-            
-            for t in self.noise_scheduler.timesteps:
-                timestep = np.array([t.item()], dtype=np.int64)
-                timestep = np.repeat(timestep, batch_size)
-                
-                # Run ONNX UNet
-                model_output = self.unet_session.run(
-                    ['noise_pred'],
-                    {
-                        'sample': sample,
-                        'timestep': timestep,
-                        'global_cond': global_cond
-                    }
-                )[0]
-                
-                # Scheduler step
-                sample = self.noise_scheduler.step(
-                    torch.from_numpy(model_output),
-                    t,
-                    torch.from_numpy(sample)
-                ).prev_sample.numpy()
-            
-            actions = sample
-            
-            # Extract action chunk
-            start = self.config['n_obs_steps'] - 1
-            end = start + self.config['n_action_steps']
-            action_chunk = actions[:, start:end]
-            
-            # Unnormalize the entire chunk immediately (Vectorized)
-            # action_chunk is (1, n_action_steps, action_dim)
-            action_chunk_unnorm = self._unnormalize_action(action_chunk)
+            # Run inference
+            action_chunk_unnorm = self._run_inference(images_batch, state_batch)
             
             # Add to queue (now storing Absolute Unnormalized actions)
             self._queues["action"].extend(action_chunk_unnorm[0])
-        
+
+            # Debug saving
+            if self.debug_dir:
+                try:
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                    step_dir = self.debug_dir / f"step_{self.debug_step:06d}_{timestamp}"
+                    step_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    # Save inputs
+                    cv2.imwrite(str(step_dir / "left_image.jpg"), cv2.cvtColor(left_image, cv2.COLOR_RGB2BGR))
+                    cv2.imwrite(str(step_dir / "head_image.jpg"), cv2.cvtColor(head_image, cv2.COLOR_RGB2BGR))
+                    np.save(str(step_dir / "joint_state.npy"), joint_state)
+                    
+                    # Save predicted action chunk
+                    np.save(str(step_dir / "action_chunk.npy"), action_chunk_unnorm[0])
+                    
+                    self.debug_step += 1
+                except Exception as e:
+                    print(f"Error saving debug data: {e}")
+
         # Pop next action (Already Absolute & Unnormalized)
         action = self._queues["action"].popleft()
         
         return action
+
+    def _run_inference(self, images_batch, state_batch):
+        """
+        Core inference logic: Preprocessing -> Encoding -> Denoising -> Postprocessing.
+        Args:
+            images_batch: (B, T, N, C, H, W)
+            state_batch: (B, T, D)
+        Returns:
+            action_chunk_unnorm: (B, T_action, D_action)
+        """
+        n_obs_steps = state_batch.shape[1]
+        
+        # Encode images
+        batch_size, n_obs_steps, n_cameras, C, H, W = images_batch.shape
+        images_reshaped = images_batch.reshape(batch_size * n_obs_steps, n_cameras, C, H, W)
+        features_reshaped = self._encode_images(images_reshaped)
+        img_features = features_reshaped.reshape(batch_size, n_obs_steps, -1)
+        
+        # Prepare global conditioning
+        global_cond_unflat = np.concatenate([state_batch, img_features], axis=2)
+        global_cond = global_cond_unflat.reshape(batch_size, -1).astype(np.float32)
+        
+        # Initialize noise
+        noise = np.random.randn(
+            batch_size,
+            self.config['horizon'],
+            self.config['action_dim']
+        ).astype(np.float32)
+        
+        # Denoising loop
+        sample = noise.copy()
+        
+        # Set timesteps if not already set by external scheduler management
+        # Use configured inference steps if available, otherwise train steps
+        num_inference_steps = self.config.get('num_inference_steps', self.config['num_train_timesteps'])
+        self.noise_scheduler.set_timesteps(num_inference_steps)
+        
+        for t in self.noise_scheduler.timesteps:
+            timestep = np.array([t.item()], dtype=np.int64)
+            timestep = np.repeat(timestep, batch_size)
+            
+            # Run ONNX UNet
+            model_output = self.unet_session.run(
+                ['noise_pred'],
+                {
+                    'sample': sample,
+                    'timestep': timestep,
+                    'global_cond': global_cond
+                }
+            )[0]
+            
+            # Scheduler step
+            sample = self.noise_scheduler.step(
+                torch.from_numpy(model_output),
+                t,
+                torch.from_numpy(sample)
+            ).prev_sample.numpy()
+        
+        actions = sample
+        
+        # Extract action chunk
+        start = self.config['n_obs_steps'] - 1
+        end = start + self.config['n_action_steps']
+        action_chunk = actions[:, start:end]
+        
+        # Unnormalize the entire chunk immediately (Vectorized)
+        # action_chunk is (1, n_action_steps, action_dim)
+        action_chunk_unnorm = self._unnormalize_action(action_chunk)
+        
+        return action_chunk_unnorm
+
+    def _warmup(self, n_steps: int = 5):
+        """Run inference with dummy inputs to warm up the engine."""
+        print(f"Running warmup for {n_steps} steps...")
+        
+        # Create dummy inputs matching the expected shapes
+        # images_batch: (B, T, N, C, H, W)
+        # state_batch: (B, T, D)
+        
+        batch_size = 1
+        n_obs_steps = self.config['n_obs_steps']
+        n_cameras = 2 # Left, Head
+        C, H, W = 3, 224, 224 # Wait, target size is (224, 178) -> (178, 224)?
+        # preprocess_image does: transpose(image_normalized, (2, 0, 1)) -> (C, H, W)
+        # target_size is (224, 178) (width, height)
+        # So H=178, W=224
+        H, W = self.target_size[1], self.target_size[0]
+        state_dim = self.config['state_dim']
+        
+        dummy_images = np.random.rand(batch_size, n_obs_steps, n_cameras, C, H, W).astype(np.float32)
+        dummy_state = np.random.rand(batch_size, n_obs_steps, state_dim).astype(np.float32)
+        
+        for i in range(n_steps):
+            print(f"Warmup step {i+1}/{n_steps}...")
+            self._run_inference(dummy_images, dummy_state)
+        
+
 
     def predict_from_ros_messages(self, left_compressed_msg, head_compressed_msg, joint_state_msg) -> np.ndarray:
         """
@@ -560,7 +623,7 @@ class ONNXTensorRTInference:
 class InferenceNode(Node):
     """ROS2 node for LeRobot inference deployment with image preprocessing (ONNX+TensorRT)."""
     
-    def __init__(self, checkpoint_path: str, onnx_dir: str, device: str = "cuda", inference_frequency: float = 20.0, mode: str = "continuous"):
+    def __init__(self, checkpoint_path: str, onnx_dir: str, device: str = "cuda", inference_frequency: float = 20.0, mode: str = "continuous", debug: bool = False):
         """
         Initialize the ROS inference node.
         
@@ -573,19 +636,42 @@ class InferenceNode(Node):
         """
         super().__init__('lerobot_inference_node_onnx')
         
-        # Initialize inference system
-        self.inference = ONNXTensorRTInference(checkpoint_path, onnx_dir, device)
-        
         # Configuration
         self.mode = mode
+        self.debug = debug
         self.inference_frequency = inference_frequency
         self.inference_interval = 1.0 / inference_frequency
+        
+        # Setup debug directory
+        self.debug_dir = None
+        self.timing_log_path = None
+        if self.debug:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.debug_dir = Path(f"debug_inference_{timestamp}")
+            self.debug_dir.mkdir(parents=True, exist_ok=True)
+            self.timing_log_path = self.debug_dir / "timing_log.txt"
+            with open(self.timing_log_path, "w") as f:
+                f.write("timestamp,metric,value_ms\n")
+            self.get_logger().info(f"Debug mode enabled. Saving data to {self.debug_dir}")
+
+        # Initialize inference system
+        self.inference = ONNXTensorRTInference(checkpoint_path, onnx_dir, device, debug_dir=self.debug_dir)
+        
+        # Run warmup
+        self.get_logger().info("Warming up inference engine...")
+        self.inference._warmup()
+        self.get_logger().info("Warmup complete.")
         
         # Message storage (latest messages from each topic)
         self.latest_messages = {
             'left_image': None,
             'head_image': None,
             'joint_state': None
+        }
+        self.latest_message_times = {
+            'left_image': 0.0,
+            'head_image': 0.0,
+            'joint_state': 0.0
         }
         self.message_lock = threading.Lock()
         
@@ -652,6 +738,7 @@ class InferenceNode(Node):
         """Handle left arm camera messages."""
         with self.message_lock:
             self.latest_messages['left_image'] = msg
+            self.latest_message_times['left_image'] = time.time()
         
         # In triggered mode, trigger inference from left camera updates
         if self.mode == 'triggered':
@@ -661,12 +748,14 @@ class InferenceNode(Node):
         """Handle head camera messages."""
         with self.message_lock:
             self.latest_messages['head_image'] = msg
+            self.latest_message_times['head_image'] = time.time()
         # Don't trigger inference from head camera to avoid conflicts
     
     def joint_state_callback(self, msg: JointState):
         """Handle joint state messages."""
         with self.message_lock:
             self.latest_messages['joint_state'] = msg
+            self.latest_message_times['joint_state'] = time.time()
         # Don't trigger inference from joint states to avoid conflicts
     
     def trigger_inference(self):
@@ -750,6 +839,26 @@ class InferenceNode(Node):
                         joint_msg = self.latest_messages['joint_state'] if self.inference.input_mode != "vision_only" else None
                         
                         # Run inference
+                        if self.debug:
+                            # Calculate latency: now - min(message_times)
+                            # Only consider times for required messages
+                            msg_times = [self.latest_message_times['left_image'], self.latest_message_times['head_image']]
+                            if self.inference.input_mode != "vision_only":
+                                msg_times.append(self.latest_message_times['joint_state'])
+                            
+                            latency = time.time() - min(msg_times)
+                            latency_ms = latency * 1000
+                            self.get_logger().info(f"[DEBUG] Message Latency (Receive -> Inference Start): {latency_ms:.2f} ms")
+                            
+                            # Log to file
+                            if self.timing_log_path:
+                                try:
+                                    with open(self.timing_log_path, "a") as f:
+                                        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+                                        f.write(f"{timestamp},message_latency_ms,{latency_ms:.4f}\n")
+                                except Exception as e:
+                                    self.get_logger().error(f"Failed to write to timing log: {e}")
+
                         self.run_inference_synchronous(left_msg, head_msg, joint_msg)
                     else:
                         missing_msgs = [msg_type for msg_type in required_messages if self.latest_messages[msg_type] is None]
@@ -789,7 +898,24 @@ class InferenceNode(Node):
         """Run inference synchronously with the provided messages."""
         try:
             # Process ROS messages and run inference
+            if self.debug:
+                start_time = time.perf_counter()
+                
             action = self.inference.predict_from_ros_messages(left_msg, head_msg, joint_msg)
+            
+            if self.debug:
+                inference_time = time.perf_counter() - start_time
+                inference_time_ms = inference_time * 1000
+                self.get_logger().info(f"[DEBUG] Inference Time (Predict -> Publish): {inference_time_ms:.2f} ms")
+                
+                # Log to file
+                if self.timing_log_path:
+                    try:
+                        with open(self.timing_log_path, "a") as f:
+                            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+                            f.write(f"{timestamp},inference_time_ms,{inference_time_ms:.4f}\n")
+                    except Exception as e:
+                        self.get_logger().error(f"Failed to write to timing log: {e}")
             
             # Publish action as JointTrajectory
             self.publish_action(action)
@@ -799,6 +925,9 @@ class InferenceNode(Node):
     
     def publish_action(self, action: np.ndarray):
         """Publish action as JointTrajectory message."""
+        if action is None:
+            return
+            
         trajectory_msg = JointTrajectory()
         trajectory_msg.header = Header()
         trajectory_msg.header.stamp = self.get_clock().now().to_msg()
@@ -881,6 +1010,11 @@ def main():
         choices=['continuous', 'triggered'],
         help='Inference mode: continuous (fixed frequency) or triggered (by topic updates)'
     )
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='Enable debug mode to log timing and save inference data'
+    )
     
     # Parse known args to allow ROS args
     parsed_args, unknown = parser.parse_known_args()
@@ -895,7 +1029,8 @@ def main():
             onnx_dir=parsed_args.onnx_dir,
             device=parsed_args.device,
             inference_frequency=parsed_args.frequency,
-            mode=parsed_args.mode
+            mode=parsed_args.mode,
+            debug=parsed_args.debug
         )
         
         print("LeRobot ONNX Inference Node started (Approach Plate - Absolute)")
