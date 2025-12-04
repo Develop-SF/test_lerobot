@@ -50,16 +50,25 @@ from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
 
 class ONNXTensorRTInference:
-    """ONNX Runtime with TensorRT backend inference for Approach Real Bing 20Hz model."""
+    """
+    ONNX Runtime with TensorRT backend inference for Approach Real Bing 20Hz model.
+    
+    This class handles:
+    1. Loading ONNX models (RGB Encoder, UNet) with TensorRT optimization.
+    2. Image preprocessing (Crop, Rotate, Resize, Normalize).
+    3. State normalization and relative action handling.
+    4. Denoising loop using DDIM scheduler.
+    5. Action unnormalization and conversion from relative to absolute.
+    """
     
     def __init__(self, checkpoint_path: str, onnx_dir: str, device: str = "cuda"):
         """
         Initialize the ONNX+TensorRT inference system.
         
         Args:
-            checkpoint_path: Path to original model checkpoint (for normalization stats)
-            onnx_dir: Path to ONNX models directory
-            device: Device for inference ("cuda" or "cpu")
+            checkpoint_path: Path to original model checkpoint (used for loading normalization stats).
+            onnx_dir: Path to directory containing ONNX models (unet.onnx, rgb_encoder.onnx) and config.
+            device: Device for inference ("cuda" or "cpu").
         """
         self.device = device
         self.checkpoint_path = Path(checkpoint_path)
@@ -450,13 +459,21 @@ class ONNXTensorRTInference:
         """
         Run inference on preprocessed inputs.
         
+        This method:
+        1. Preprocesses images (HWC -> CHW, Normalize).
+        2. Updates observation queues.
+        3. Prepares batches for inference.
+        4. Handles relative state conversion (Absolute -> Relative).
+        5. Runs the diffusion inference loop.
+        6. Converts predicted relative actions back to absolute actions.
+        
         Args:
-            left_image: Left arm camera image (H, W, 3) RGB - should be 193×237
-            head_image: Head camera image (H, W, 3) RGB - should be 193×237
-            joint_state: Joint positions (6,) - Absolute, Unnormalized
+            left_image: Left arm camera image (H, W, 3) RGB.
+            head_image: Head camera image (H, W, 3) RGB.
+            joint_state: Joint positions (6,).
             
         Returns:
-            Action array (6,) - Absolute, Unnormalized
+            Action array (6,) representing the next target joint position.
         """
         # Preprocess images (HWC -> CHW, [0,1])
         left_processed = self.preprocess_image(left_image)
@@ -615,10 +632,25 @@ class ONNXTensorRTInference:
 
 
 class PredictionEvaluator:
-    """Evaluate model predictions against ground truth using ONNX+TensorRT."""
+    """
+    Evaluate model predictions against ground truth using ONNX+TensorRT.
+    
+    This class:
+    1. Loads synchronized data from rosbags.
+    2. Runs inference on the loaded data.
+    3. Compares predicted actions with ground truth actions (from joint trajectory commands).
+    4. Calculates and reports metrics (MAE, RMSE, Max Error).
+    """
     
     def __init__(self, checkpoint_path: str, onnx_dir: str, device: str = "cuda"):
-        """Initialize evaluator with ONNX+TensorRT inference."""
+        """
+        Initialize evaluator with ONNX+TensorRT inference.
+        
+        Args:
+            checkpoint_path: Path to model checkpoint.
+            onnx_dir: Path to ONNX models directory.
+            device: Device for inference.
+        """
         self.inference = ONNXTensorRTInference(checkpoint_path, onnx_dir, device)
         
         # Topic names

@@ -9,14 +9,14 @@ The inference code includes **image preprocessing** that matches the training pi
 ### Image Preprocessing Pipeline
 
 1. **Top View (Head Camera)**:
-   - Crop to bounding box: `(x=247, y=122, w=193, h=237)`
+   - Crop to bounding box: `(x=260, y=135, w=178, h=224)`
    - Rotate 90° clockwise
-   - Final size: **237×193** (width×height)
+   - Final size: **224×178** (width×height)
 
 2. **Left Arm Camera**:
-   - Resize to **237×193** (width×height)
+   - Resize to **224×178** (width×height)
 
-Both cameras output the same resolution (237×193) for the model.
+Both cameras output the same resolution (224×178) for the model.
 
 ## Files
 
@@ -25,6 +25,16 @@ Both cameras output the same resolution (237×193) for the model.
 - `README.md` - This file
 
 ## Usage
+
+### Prerequisites: Convert to ONNX
+
+If using the ONNX inference node (`inference_node_onnx.py`), you must first convert the model:
+
+```bash
+python convert_to_onnx.py \
+    --checkpoint /path/to/checkpoint \
+    --output-dir ./onnx_models
+```
 
 ### 1. Test Inference Module
 
@@ -46,9 +56,29 @@ python inference_node.py \
 #### Triggered Mode (Event-Driven)
 ```bash
 python inference_node.py \
-    --checkpoint /home/shinfang-2f/jay_pick_two_arms_and_hands_sim_20250523_085738/IL/lerobot/approach_plate_lerobot \
+    --checkpoint /path/to/checkpoint \
     --device cuda \
     --mode triggered
+```
+
+### 3. Run ONNX Inference Node (Optimized)
+
+```bash
+python inference_node_onnx.py \
+    --checkpoint /path/to/checkpoint \
+    --onnx-dir ./onnx_models \
+    --device cuda \
+    --frequency 20.0
+```
+
+### 4. Evaluate Predictions (ONNX)
+
+```bash
+python evaluate_predictions_onnx.py \
+    --checkpoint /path/to/checkpoint \
+    --rosbag /path/to/rosbag \
+    --onnx-dir ./onnx_models \
+    --plot
 ```
 
 ## Input/Output Modes
@@ -80,7 +110,7 @@ This inference code differs from the `approach_lerobot/testing` code in the foll
 
 1. **Image Cropping**: Top view is cropped to focus on the task area
 2. **Image Rotation**: Top view is rotated 90° clockwise after cropping
-3. **Image Resizing**: Both cameras are resized to matching 237×193 resolution
+3. **Image Resizing**: Both cameras are resized to matching 224×178 resolution
 4. **No Downsampling**: Images maintain higher resolution compared to the original 180×320
 
 These preprocessing steps match exactly what was done during training with `rosbag_to_lerobot_cropped_trimmed.py`.
@@ -101,5 +131,5 @@ ROS Messages → Image Preprocessing → Model Inference → Action Publishing
 
 - The inference system automatically validates that incoming images match the expected preprocessing
 - Image preprocessing is applied in `decode_compressed_image_msg()` with the `is_top_view` flag
-- The model expects images at 237×193 resolution (height×width)
+- The model expects images at 224×178 resolution (width×height)
 - All preprocessing parameters are hardcoded to match the training pipeline

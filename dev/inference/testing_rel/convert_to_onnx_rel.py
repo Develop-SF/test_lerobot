@@ -78,7 +78,23 @@ class RGBEncoderCoreONNX(torch.nn.Module):
 
 
 def export_rgb_encoder(policy, output_dir: Path, opset_version: int = 17):
-    """Export RGB encoder to ONNX."""
+    """
+    Export RGB encoder to ONNX.
+    
+    This function:
+    1. Locates the RGB encoder within the policy structure.
+    2. Wraps it in `RGBEncoderCoreONNX` to export only the core network (ResNet + Spatial Softmax).
+    3. Handles the fact that image cropping and reshaping are done in Python preprocessing.
+    4. Exports the model to `rgb_encoder.onnx`.
+    
+    Args:
+        policy: The loaded LeRobot policy.
+        output_dir: Directory to save the ONNX model.
+        opset_version: ONNX opset version (default: 17).
+        
+    Returns:
+        Path to the exported ONNX file.
+    """
     print("\n" + "="*80)
     print("EXPORTING RGB ENCODER")
     print("="*80)
@@ -197,7 +213,23 @@ def export_rgb_encoder(policy, output_dir: Path, opset_version: int = 17):
 
 
 def export_unet(policy, output_dir: Path, opset_version: int = 17):
-    """Export UNet denoising model to ONNX."""
+    """
+    Export UNet denoising model to ONNX.
+    
+    This function:
+    1. Locates the UNet within the policy structure.
+    2. Determines input/output dimensions from the policy config.
+    3. Creates dummy inputs (sample, timestep, global_cond) matching the model signature.
+    4. Exports the model to `unet.onnx`.
+    
+    Args:
+        policy: The loaded LeRobot policy.
+        output_dir: Directory to save the ONNX model.
+        opset_version: ONNX opset version (default: 17).
+        
+    Returns:
+        Path to the exported ONNX file.
+    """
     print("\n" + "="*80)
     print("EXPORTING UNET")
     print("="*80)
@@ -328,7 +360,21 @@ def export_unet(policy, output_dir: Path, opset_version: int = 17):
 
 
 def save_config(policy, output_dir: Path, use_relative_actions: bool = False, arm_dim: int = 6):
-    """Save ONNX inference configuration."""
+    """
+    Save ONNX inference configuration to JSON.
+    
+    This extracts key parameters from the policy config (horizon, dimensions, scheduler settings)
+    and saves them to `onnx_config.json` for use by the inference node.
+    
+    Args:
+        policy: The loaded LeRobot policy.
+        output_dir: Directory to save the config file.
+        use_relative_actions: Whether to enable relative action mode.
+        arm_dim: Number of arm joints (for relative action handling).
+        
+    Returns:
+        Path to the saved config file.
+    """
     print("\n" + "="*80)
     print("SAVING CONFIGURATION")
     print("="*80)

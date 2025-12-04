@@ -41,16 +41,26 @@ from std_msgs.msg import Header
 
 
 class ONNXTensorRTInference:
-    """ONNX Runtime with TensorRT backend inference for Approach Real Bing 20Hz model (Relative)."""
+    """
+    ONNX Runtime with TensorRT backend inference for Approach Real Bing 20Hz model (Relative).
+    
+    This class handles:
+    1. Loading ONNX models (RGB Encoder, UNet) with TensorRT optimization.
+    2. Image preprocessing (Crop, Rotate, Resize, Normalize).
+    3. State normalization and relative action handling.
+    4. Denoising loop using DDIM scheduler.
+    5. Action unnormalization and conversion from relative to absolute.
+    """
     
     def __init__(self, checkpoint_path: str, onnx_dir: str, device: str = "cuda", debug_dir: Optional[Path] = None):
         """
         Initialize the ONNX+TensorRT inference system.
         
         Args:
-            checkpoint_path: Path to original model checkpoint (for normalization stats)
-            onnx_dir: Path to ONNX models directory
-            device: Device for inference ("cuda" or "cpu")
+            checkpoint_path: Path to original model checkpoint (used for loading normalization stats).
+            onnx_dir: Path to directory containing ONNX models (unet.onnx, rgb_encoder.onnx) and config.
+            device: Device for inference ("cuda" or "cpu").
+            debug_dir: Optional directory to save debug data (images, states, actions).
         """
         self.device = device
         self.checkpoint_path = Path(checkpoint_path)
@@ -446,13 +456,21 @@ class ONNXTensorRTInference:
         """
         Run inference on preprocessed inputs.
         
+        This method:
+        1. Preprocesses images (HWC -> CHW, Normalize).
+        2. Updates observation queues.
+        3. Prepares batches for inference.
+        4. Handles relative state conversion (Absolute -> Relative).
+        5. Runs the diffusion inference loop.
+        6. Converts predicted relative actions back to absolute actions.
+        
         Args:
-            left_image: Left arm camera image (H, W, 3) RGB - should be 224x178
-            head_image: Head camera image (H, W, 3) RGB - should be 224x178
-            joint_state: Joint positions (6,)
+            left_image: Left arm camera image (H, W, 3) RGB.
+            head_image: Head camera image (H, W, 3) RGB.
+            joint_state: Joint positions (6,).
             
         Returns:
-            Action array (6,)
+            Action array (6,) representing the next target joint position.
         """
         # Preprocess images (HWC -> CHW, [0,1])
         left_processed = self.preprocess_image(left_image)
