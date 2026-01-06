@@ -37,6 +37,14 @@
     title: Notebooks
   title: "Resources"
 - sections:
+  - local: testing_branch
+    title: Testing Branch Guide
+  - local: testing_quickref
+    title: Quick Reference
+  - local: testing_setup
+    title: Documentation Setup
+  title: "Testing Branch"
+- sections:
   - local: contributing
     title: Contribute to LeRobot
   - local: backwardcomp

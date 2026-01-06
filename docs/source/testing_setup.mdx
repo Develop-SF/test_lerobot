@@ -1,0 +1,312 @@
+# Testing Branch Documentation Setup
+
+This guide explains how to build and preview the interactive documentation for the testing branch.
+
+## Prerequisites
+
+### Install Documentation Dependencies
+
+```bash
+cd /home/shinfang-ovx/workspaces/test_lerobot
+
+# Install doc-builder and dependencies
+pip install -e ".[docs]"
+
+# Install watchdog for live preview
+pip install watchdog
+```
+
+### Install Node.js
+
+If you don't have Node.js installed, you can install it via:
+
+**Ubuntu/Debian:**
+```bash
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+sudo apt-get install -y nodejs
+```
+
+**Or using conda:**
+```bash
+conda install -c conda-forge nodejs
+```
+
+## Building the Documentation
+
+### Build Static Documentation
+
+To build the documentation as static HTML:
+
+```bash
+cd /home/shinfang-ovx/workspaces/test_lerobot
+
+# Build documentation
+doc-builder build lerobot docs/source/ --build_dir ~/tmp/lerobot-docs
+
+# The HTML files will be in ~/tmp/lerobot-docs
+```
+
+### Preview Documentation Locally
+
+To preview the documentation with live reload:
+
+```bash
+cd /home/shinfang-ovx/workspaces/test_lerobot
+
+# Start preview server
+doc-builder preview lerobot docs/source/
+
+# Open browser to http://localhost:3000
+```
+
+The preview server will:
+- Build the documentation
+- Start a local web server at http://localhost:3000
+- Watch for file changes and auto-reload
+- Show your new testing branch pages in the navigation
+
+<Tip>
+
+**Note:** When you add completely new files (like we did with `testing_branch.mdx` and `testing_quickref.mdx`), you need to:
+1. Update `_toctree.yml` (already done ✅)
+2. Restart the preview server (Ctrl-C to stop, then run preview command again)
+
+</Tip>
+
+## What's Included
+
+The testing branch documentation includes two new pages:
+
+### 1. Testing Branch Guide (`testing_branch.mdx`)
+
+**URL:** http://localhost:3000/testing_branch
+
+**Content:**
+- Overview of testing branch changes
+- Complete workflow from ROS bags to robot control
+- Detailed instructions for each step:
+  - ROS bag conversion
+  - Model training (absolute and relative actions)
+  - ONNX conversion
+  - Inference and deployment
+- Performance optimization
+- Troubleshooting guide
+- Safety considerations
+- Architecture details
+
+### 2. Quick Reference (`testing_quickref.mdx`)
+
+**URL:** http://localhost:3000/testing_quickref
+
+**Content:**
+- Quick command reference
+- One-liner examples for each step
+- Input/output modes table
+- ROS2 topics reference
+- Troubleshooting quick fixes
+- Performance comparison
+- Complete pipeline example
+- Safety checklist
+
+## Navigation
+
+The new pages appear in the documentation under a new "Testing Branch" section:
+
+```
+📚 LeRobot Documentation
+├── Get Started
+├── Tutorials
+├── Policies
+├── Robots
+├── Resources
+├── Testing Branch ⭐ NEW
+│   ├── Testing Branch Guide
+│   └── Quick Reference
+└── About
+```
+
+## Customizing the Documentation
+
+### Adding More Pages
+
+To add more documentation pages:
+
+1. **Create MDX file** in `docs/source/`:
+   ```bash
+   touch docs/source/my_new_page.mdx
+   ```
+
+2. **Add to `_toctree.yml`**:
+   ```yaml
+   - sections:
+     - local: testing_branch
+       title: Testing Branch Guide
+     - local: testing_quickref
+       title: Quick Reference
+     - local: my_new_page
+       title: My New Page
+     title: "Testing Branch"
+   ```
+
+3. **Restart preview server** to see changes
+
+### Using MDX Features
+
+The documentation uses MDX format which supports:
+
+#### Code Blocks
+
+```python
+# Python code example
+from lerobot.common.datasets import LeRobotDataset
+
+dataset = LeRobotDataset("my_dataset")
+```
+
+#### Tips and Warnings
+
+```mdx
+<Tip>
+Helpful tip here!
+</Tip>
+
+<Tip warning={true}>
+Important warning!
+</Tip>
+```
+
+#### Tables
+
+```mdx
+| Column 1 | Column 2 |
+|----------|----------|
+| Value 1  | Value 2  |
+```
+
+#### Links
+
+```mdx
+[Link to another page](testing_quickref)
+[External link](https://huggingface.co/lerobot)
+```
+
+## Deployment
+
+### Deploy to GitHub Pages
+
+Once you're happy with the documentation:
+
+1. **Commit changes:**
+   ```bash
+   git add docs/source/testing_branch.mdx
+   git add docs/source/testing_quickref.mdx
+   git add docs/source/_toctree.yml
+   git commit -m "Add testing branch documentation"
+   git push origin testing
+   ```
+
+2. **Open Pull Request** to merge into main
+
+3. **Automatic deployment:** The documentation will be automatically built and deployed when changes are merged
+
+### Deploy to Hugging Face Spaces
+
+You can also deploy the documentation as a Hugging Face Space:
+
+1. **Create a Space** at https://huggingface.co/new-space
+2. **Select "Gradio" or "Streamlit"** as the SDK
+3. **Push documentation** to the Space
+4. **Configure** to serve the built HTML files
+
+## File Structure
+
+```
+test_lerobot/
+├── docs/
+│   ├── README.md                          # Documentation README
+│   └── source/
+│       ├── _toctree.yml                   # Navigation structure ✨ Updated
+│       ├── index.mdx                      # Homepage
+│       ├── installation.mdx               # Installation guide
+│       ├── testing_branch.mdx             # Testing branch guide ⭐ NEW
+│       ├── testing_quickref.mdx           # Quick reference ⭐ NEW
+│       └── ... (other pages)
+│
+├── TESTING_BRANCH_GUIDE.md               # Markdown version (for GitHub)
+├── QUICK_REFERENCE.md                    # Markdown version (for GitHub)
+├── WORKFLOW_DIAGRAM.md                   # Diagrams (for GitHub)
+├── BRANCH_CHANGES_SUMMARY.md             # Changes summary (for GitHub)
+└── INDEX.md                              # Index (for GitHub)
+```
+
+## Benefits of Interactive Documentation
+
+The Sphinx/doc-builder documentation provides:
+
+✅ **Navigation menu** - Easy browsing with sidebar  
+✅ **Search functionality** - Find content quickly  
+✅ **Responsive design** - Works on mobile and desktop  
+✅ **Syntax highlighting** - Beautiful code blocks  
+✅ **Auto-linking** - Cross-references between pages  
+✅ **Version control** - Support for multiple versions  
+✅ **Live preview** - See changes instantly  
+✅ **Professional appearance** - Consistent styling  
+
+## Troubleshooting
+
+### Issue: doc-builder not found
+
+**Solution:**
+```bash
+pip install hf-doc-builder
+```
+
+### Issue: Node.js not found
+
+**Solution:**
+```bash
+# Ubuntu/Debian
+sudo apt-get install nodejs npm
+
+# Or with conda
+conda install -c conda-forge nodejs
+```
+
+### Issue: Preview not updating
+
+**Solution:**
+1. Stop the preview server (Ctrl-C)
+2. Clear any cache: `rm -rf ~/.cache/doc-builder`
+3. Restart: `doc-builder preview lerobot docs/source/`
+
+### Issue: Port 3000 already in use
+
+**Solution:**
+```bash
+# Find and kill process using port 3000
+lsof -ti:3000 | xargs kill -9
+
+# Or use a different port
+doc-builder preview lerobot docs/source/ --port 3001
+```
+
+## Next Steps
+
+1. **Install dependencies** (see above)
+2. **Start preview server:**
+   ```bash
+   doc-builder preview lerobot docs/source/
+   ```
+3. **Open browser** to http://localhost:3000
+4. **Navigate to** "Testing Branch" section
+5. **Explore** the new documentation pages!
+
+## Additional Resources
+
+- **Doc-builder documentation:** https://github.com/huggingface/doc-builder
+- **MDX syntax:** https://mdxjs.com/
+- **Existing guides:** See other `.mdx` files in `docs/source/`
+
+---
+
+**Enjoy your interactive documentation! 📚✨**

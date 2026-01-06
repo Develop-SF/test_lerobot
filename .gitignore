@@ -176,3 +176,6 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+sphinx_docs/_build/
+guides/
