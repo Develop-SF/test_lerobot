@@ -6,6 +6,7 @@ Converts ROS2 bag files to LeRobot dataset format with:
 - Top view image cropping (bounding box)
 - Episode-specific frame trimming
 - Flexible input/output modes
+- Parallel batch processing of multiple bags
 """
 
 import os
@@ -17,6 +18,7 @@ from typing import Dict, List, Tuple, Optional
 import numpy as np
 import cv2
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ROS2 imports
 import rclpy
@@ -155,7 +157,7 @@ class ROSBag2ConverterCroppedTrimmed:
         Get pre-synchronized messages grouped by message index.
         Aligns all topics to have the same message count by truncating from the end.
         """
-        storage_options = StorageOptions(uri=bag_path, storage_id='sqlite3')
+        storage_options = StorageOptions(uri=bag_path, storage_id='mcap')
         converter_options = ConverterOptions(
             input_serialization_format='cdr',
             output_serialization_format='cdr'
@@ -204,6 +206,10 @@ class ROSBag2ConverterCroppedTrimmed:
         max_count = max(message_counts.values())
         
         if min_count != max_count:
+            count_diff = max_count - min_count
+            if count_diff > 2:
+                print(f"❌ Topic message count difference too large ({count_diff} > 2), skipping bag")
+                return []
             print(f"⚠️ Topics have different message counts (min={min_count}, max={max_count})")
             print(f"✂️ Truncating all topics to {min_count} messages (cutting from end)")
             
@@ -614,12 +620,128 @@ class ROSBag2ConverterCroppedTrimmed:
                 self.dataset.episode_buffer = None
             return False
     
-    def convert_bags(self, bag_directories: List[str]) -> None:
-        """Convert multiple bag files to LeRobot dataset."""
+    def extract_frames_from_bag(self, bag_path: str, original_episode_index: int) -> Tuple[List[Dict], List[float], bool]:
+        """
+        Extract and prepare frames from a bag without writing to dataset.
+        This is used for parallel processing.
+        
+        Returns:
+            Tuple of (frame_data_list, timestamps, success)
+        """
+        try:
+            # Get synchronized messages
+            synchronized_frames = self.get_synchronized_messages(bag_path)
+            if not synchronized_frames:
+                print(f"❌ No synchronized frames found in {bag_path}")
+                return None, None, False
+            
+            print(f"📊 Extracted {len(synchronized_frames)} synchronized frames from {Path(bag_path).name}")
+            
+            # Apply episode-specific trimming
+            trimmed_frames = self.apply_episode_trimming(synchronized_frames, original_episode_index)
+            
+            if len(trimmed_frames) < 1:
+                print(f"❌ No frames remaining after trimming")
+                return None, None, False
+            
+            # Generate regular timestamps
+            regular_timestamps = self.create_regular_timestamps(len(trimmed_frames))
+            
+            # Process each frame
+            processed_frames = []
+            for i, frame_data in enumerate(trimmed_frames):
+                frame_dict = {}
+                
+                # Process each topic in the frame
+                for topic_name, (msg, original_timestamp) in frame_data.items():
+                    if topic_name in self.image_topics:
+                        # Decode image (with cropping for top view)
+                        image = self.decode_compressed_image_from_msg(msg, topic_name, downsize=self.downsize_images)
+                        # Convert to CHW format
+                        image = np.transpose(image, (2, 0, 1))
+                        feature_key = self.topic_to_feature_key(topic_name, 'observation.images')
+                        frame_dict[feature_key] = image
+                            
+                    elif topic_name in self.joint_state_topics and self.input_mode != "vision_only":
+                        # Extract left hand joint data
+                        left_hand_state = self.extract_left_hand_state_from_msg(msg)
+                        
+                        if self.input_mode == "vision_pos":
+                            frame_dict["observation.state"] = left_hand_state['position']
+                        elif self.input_mode == "vision_pos_vel":
+                            combined_state = np.concatenate([
+                                left_hand_state['position'],
+                                left_hand_state['velocity']
+                            ])
+                            frame_dict["observation.state"] = combined_state
+                    
+                    elif topic_name in self.action_command_topics:
+                        # Extract action command
+                        action = self.extract_controller_command_from_msg(msg)
+                        frame_dict["action"] = action
+                
+                processed_frames.append(frame_dict)
+            
+            print(f"✅ Extracted {len(processed_frames)} processed frames from {Path(bag_path).name}")
+            return processed_frames, regular_timestamps, True
+            
+        except Exception as e:
+            print(f"❌ Error extracting frames from {bag_path}: {e}")
+            import traceback
+            traceback.print_exc()
+            return None, None, False
+    
+    def write_frames_to_dataset(self, frames_data: List[Dict], timestamps: List[float]) -> bool:
+        """
+        Write pre-extracted frames to the dataset.
+        This is thread-safe when called sequentially.
+        
+        Args:
+            frames_data: List of processed frame dictionaries
+            timestamps: List of timestamps for frames
+            
+        Returns:
+            Success boolean
+        """
+        try:
+            # Create episode buffer
+            self.dataset.episode_buffer = self.dataset.create_episode_buffer(self.episode_index)
+            
+            # Write each frame
+            for i, frame_dict in enumerate(frames_data):
+                timestamp = timestamps[i]
+                
+                # Add frame to dataset
+                self.dataset.add_frame(frame_dict)
+            
+            # Save episode
+            self.dataset.save_episode()
+            
+            print(f"✅ Saved episode {self.episode_index} with {len(frames_data)} frames")
+            self.episode_index += 1
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error writing frames to dataset: {e}")
+            import traceback
+            traceback.print_exc()
+            if hasattr(self.dataset, 'episode_buffer') and self.dataset.episode_buffer:
+                self.dataset.episode_buffer = None
+            return False
+    
+    def convert_bags(self, bag_directories: List[str], num_workers: int = 4) -> None:
+        """
+        Convert multiple bag files to LeRobot dataset with parallel extraction.
+        
+        Args:
+            bag_directories: List of paths to bag directories
+            num_workers: Number of parallel workers for bag extraction (default: 4)
+        """
         print(f"\n{'='*60}")
-        print(f"🚀 Starting ROS Bag to LeRobot Conversion")
+        print(f"🚀 Starting ROS Bag to LeRobot Conversion (Parallel Mode)")
         print(f"{'='*60}")
         print(f"Total bag files: {len(bag_directories)}")
+        print(f"Parallel workers: {num_workers}")
         
         if not bag_directories:
             raise ValueError("No bag directories provided")
@@ -684,8 +806,8 @@ class ROSBag2ConverterCroppedTrimmed:
                 tolerance_s=self.tolerance_s
             )
             
-            # Process all bag files
-            successful_conversions = 0
+            # Prepare bags for processing (filter skipped episodes)
+            bags_to_process = []
             for i, bag_path in enumerate(bag_directories):
                 # Determine original episode index from mapping file
                 if hasattr(self, 'bag_path_to_episode_index') and bag_path in self.bag_path_to_episode_index:
@@ -701,18 +823,80 @@ class ROSBag2ConverterCroppedTrimmed:
                     print(f"\n⏭️ Skipping episode {original_episode_index} (bag: {Path(bag_path).name})")
                     continue
                 
-                print(f"\n--- 📁 Processing bag {i+1}/{len(bag_directories)} ---")
+                bags_to_process.append((i, bag_path, original_episode_index))
+            
+            print(f"\n📊 Will process {len(bags_to_process)} bags with {num_workers} workers")
+            
+            # PHASE 1: Parallel extraction of frames from bags
+            print(f"\n{'='*60}")
+            print(f"📊 PHASE 1: Extracting frames from bags (parallel)")
+            print(f"{'='*60}")
+            
+            extracted_frames = {}
+            
+            # Create extraction tasks
+            extraction_tasks = [
+                (bag_path, original_episode_index) 
+                for _, bag_path, original_episode_index in bags_to_process
+            ]
+            
+            # Run parallel extraction using thread pool
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                futures = {}
+                for bag_path, original_episode_index in extraction_tasks:
+                    future = executor.submit(self._extract_bag_worker, bag_path, original_episode_index)
+                    futures[future] = (bag_path, original_episode_index)
+                
+                # Collect results as they complete
+                successful_extractions = 0
+                for future in as_completed(futures):
+                    bag_path, original_episode_index = futures[future]
+                    try:
+                        frames_data, timestamps, success = future.result()
+                        if success:
+                            extracted_frames[bag_path] = (frames_data, timestamps, original_episode_index)
+                            successful_extractions += 1
+                            print(f"✅ Extracted: {Path(bag_path).name} ({len(frames_data)} frames)")
+                        else:
+                            print(f"❌ Failed to extract: {Path(bag_path).name}")
+                    except Exception as e:
+                        print(f"❌ Error extracting {Path(bag_path).name}: {e}")
+                        import traceback
+                        traceback.print_exc()
+            
+            print(f"\n✅ Extraction phase complete: {successful_extractions}/{len(extraction_tasks)} bags")
+            
+            # PHASE 2: Sequential writing to dataset (must be done in order)
+            print(f"\n{'='*60}")
+            print(f"💾 PHASE 2: Writing frames to dataset (sequential)")
+            print(f"{'='*60}")
+            
+            successful_writes = 0
+            total_episodes_to_write = len(extracted_frames)
+            for i, (bag_path, original_episode_index) in enumerate(extraction_tasks):
+                if bag_path not in extracted_frames:
+                    print(f"⏭️ Skipping {Path(bag_path).name} (extraction failed)")
+                    continue
+                
+                frames_data, timestamps, _ = extracted_frames[bag_path]
+                
+                print(f"\n--- 💾 Writing {successful_writes + 1}/{total_episodes_to_write} ({Path(bag_path).name}) ---")
+                
                 try:
-                    if self.process_bag_file(bag_path, original_episode_index):
-                        successful_conversions += 1
+                    if self._write_episode_worker(frames_data, timestamps, original_episode_index, bag_path):
+                        successful_writes += 1
+                        # Release memory by deleting processed frames
+                        del extracted_frames[bag_path]
                 except Exception as e:
-                    print(f"❌ Error processing {bag_path}: {e}")
+                    print(f"❌ Error writing {bag_path}: {e}")
+                    import traceback
+                    traceback.print_exc()
                     continue
             
             print(f"\n{'='*60}")
             print(f"🎉 Conversion Complete!")
             print(f"{'='*60}")
-            print(f"Successfully converted: {successful_conversions}/{len(bag_directories)} bag files")
+            print(f"Successfully converted: {successful_writes}/{len(extraction_tasks)} bag files")
             print(f"Skipped episodes: {sorted(list(self.skip_episodes))}")
             
             # Save episode mapping
@@ -727,6 +911,61 @@ class ROSBag2ConverterCroppedTrimmed:
                 print(f"⚠️ Warning during cleanup: {e}")
             
             rclpy.shutdown()
+    
+    def _extract_bag_worker(self, bag_path: str, original_episode_index: int) -> Tuple:
+        """
+        Worker function for parallel bag extraction.
+        Called from multiprocessing pool.
+        """
+        return self.extract_frames_from_bag(bag_path, original_episode_index)
+    
+    def _write_episode_worker(self, frames_data: List[Dict], timestamps: List[float], original_episode_index: int, bag_path: str) -> bool:
+        """
+        Write episode data to dataset.
+        Must be called sequentially (not in parallel).
+        """
+        try:
+            # Create episode buffer
+            self.dataset.episode_buffer = self.dataset.create_episode_buffer(self.episode_index)
+            
+            # Write each frame
+            for i, frame_dict in enumerate(frames_data):
+                # Ensure required fields
+                if "next.reward" not in frame_dict:
+                    frame_dict["next.reward"] = np.array([0.0], dtype=np.float32)
+                if "next.done" not in frame_dict:
+                    frame_dict["next.done"] = np.array([False], dtype=bool)
+                
+                # Add frame
+                self.dataset.add_frame(frame_dict, self.task_description, timestamps[i])
+            
+            # Mark last frame as episode end
+            if self.dataset.episode_buffer is not None and len(self.dataset.episode_buffer["next.done"]) > 0:
+                self.dataset.episode_buffer["next.done"][-1] = np.array([True], dtype=bool)
+            
+            # Save episode
+            self.dataset.save_episode()
+            
+            # Record mapping
+            bag_name = Path(bag_path).name
+            self.episode_mapping[self.episode_index] = {
+                "bag_path": bag_path,
+                "bag_name": bag_name,
+                "original_episode_index": original_episode_index,
+                "final_frames": len(frames_data)
+            }
+            
+            print(f"✅ Saved episode {self.episode_index} with {len(frames_data)} frames")
+            self.episode_index += 1
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error writing frames: {e}")
+            import traceback
+            traceback.print_exc()
+            if hasattr(self.dataset, 'episode_buffer') and self.dataset.episode_buffer:
+                self.dataset.episode_buffer = None
+            return False
 
 
 def main():
@@ -781,6 +1020,11 @@ def main():
     
     parser.add_argument("--skip-episodes", nargs="+", type=int, default=[],
                        help="Episode indices to skip (e.g., 1 2)")
+    
+    parser.add_argument("--num-workers", type=int, default=1,
+                       help="Number of parallel workers for bag extraction (default: 1 for sequential). "
+                            "Parallel processing (2-8 workers) speeds up conversion but requires more RAM. "
+                            "Each worker loads a full episode into memory.")
     
     args = parser.parse_args()
     
@@ -863,7 +1107,7 @@ def main():
     )
     
     start_time = time.time()
-    converter.convert_bags(bag_directories)
+    converter.convert_bags(bag_directories, num_workers=args.num_workers)
     end_time = time.time()
     
     print(f"\n⏱️ Total conversion time: {end_time - start_time:.2f} seconds")

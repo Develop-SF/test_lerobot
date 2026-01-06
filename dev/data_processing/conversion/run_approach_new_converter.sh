@@ -8,15 +8,22 @@ eval "$(conda shell.bash hook)"
 conda activate lerobot
 
 # Configuration
-BASE_DIR="/home/shinfang-2f/jay_pick_two_arms_and_hands_sim_20250523_085738/IL/lerobot/approach_new"
-OUTPUT_DIR="/home/shinfang-2f/jay_pick_two_arms_and_hands_sim_20250523_085738/IL/lerobot/approach_lerobot/dataset/input-vision_pos-output-pos_vel"
+BASE_DIR="/mnt/SF-Shared/rosbags/20251222_eric_plating_v2"
+OUTPUT_DIR="/mnt/SF-Shared/dataset/robot_learning/lerobot/eric_plating_v2"
+
+# Number of parallel workers for bag extraction
+# Default: 1 (sequential, memory-safe)
+# For faster processing with sufficient RAM: 4-8 workers
+# Each worker loads a full episode into memory
+NUM_WORKERS=1
 
 echo "Converting rosbags to LeRobot dataset"
 echo "Source: $BASE_DIR"
 echo "Output: $OUTPUT_DIR"
+echo "Parallel workers: $NUM_WORKERS (1=sequential/memory-safe, 4-8=faster/more RAM)"
 
 # Count episodes
-EPISODE_COUNT=$(find "$BASE_DIR" -maxdepth 1 -type d -name "sync_approach*" | wc -l)
+EPISODE_COUNT=$(find "$BASE_DIR" -maxdepth 1 -type d -name "eric_plating_v2*" | wc -l)
 echo "Found $EPISODE_COUNT rosbag episodes"
 
 # Confirmation
@@ -25,22 +32,27 @@ echo ""
 
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     echo "Starting conversion..."
+    echo ""
     
     python rosbag_to_lerobot_rosbag2.py \
         "$BASE_DIR" \
         --output-dir "$OUTPUT_DIR" \
-        --dataset-name "input-vision_pos-output-pos_vel" \
+        --dataset-name "eric_plating_v2" \
         --fps 20 \
-        --task "Robot approach task with dual cameras and left arm control" \
+        --task "Eric plating task with dual cameras and left arm control" \
         --tolerance 1.0 \
         --no-trim-unmoving \
         --input-mode vision_pos \
-        --output-mode pos_vel
+        --output-mode pos_vel \
+        --num-workers $NUM_WORKERS
     
     if [ $? -eq 0 ]; then
+        echo ""
         echo "Conversion completed successfully"
         echo "Dataset saved to: $OUTPUT_DIR"
+        echo "Processed with $NUM_WORKERS parallel workers"
     else
+        echo ""
         echo "Conversion failed"
         exit 1
     fi

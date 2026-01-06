@@ -3,6 +3,7 @@
 ROS Bag to LeRobot Dataset Converter
 
 Converts ROS2 bag files to LeRobot dataset format with flexible input/output modes.
+Supports parallel batch processing of multiple bags.
 """
 
 import os
@@ -14,6 +15,7 @@ from typing import Dict, List, Tuple, Optional
 import numpy as np
 import cv2
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ROS2 imports
 import rclpy
@@ -107,7 +109,7 @@ class ROSBag2Converter:
         Since all topics have the same count, we can align by index.
         """
         # Set up storage options
-        storage_options = StorageOptions(uri=bag_path, storage_id='sqlite3')
+        storage_options = StorageOptions(uri=bag_path, storage_id='mcap')
         converter_options = ConverterOptions(
             input_serialization_format='cdr',
             output_serialization_format='cdr'
@@ -164,9 +166,9 @@ class ROSBag2Converter:
             
             print(f"Warning: Topics have different message counts: {dict(zip(topic_messages.keys(), message_counts))}")
             
-            # If difference is only 1 message, truncate to shortest topic
-            if count_diff == 1:
-                print(f"📏 Message count differs by only 1 - truncating all topics to {min_count} messages")
+            # If difference is small (up to 5 messages), truncate to shortest topic
+            if count_diff <= 2:
+                print(f"📏 Message count differs by {count_diff} - truncating all topics to {min_count} messages")
                 
                 # Truncate all topics to the minimum count
                 for topic_name in topic_messages.keys():
@@ -599,9 +601,15 @@ class ROSBag2Converter:
                 self.dataset.episode_buffer = None
             return False
     
-    def convert_bags(self, bag_directories: List[str]) -> None:
-        """Convert multiple bag files to LeRobot dataset."""
-        print(f"Converting {len(bag_directories)} bag files to LeRobot dataset")
+    def convert_bags(self, bag_directories: List[str], num_workers: int = 4) -> None:
+        """
+        Convert multiple bag files to LeRobot dataset with parallel extraction.
+        
+        Args:
+            bag_directories: List of paths to bag directories
+            num_workers: Number of parallel workers for bag extraction (default: 4)
+        """
+        print(f"Converting {len(bag_directories)} bag files to LeRobot dataset (parallel mode, {num_workers} workers)")
         
         if not bag_directories:
             raise ValueError("No bag directories provided")
@@ -651,18 +659,69 @@ class ROSBag2Converter:
                 tolerance_s=self.tolerance_s  # Relaxed tolerance
             )
             
-            # Process all bag files
-            successful_conversions = 0
+            print(f"\n{'='*60}")
+            print(f"📊 PHASE 1: Extracting frames from bags (parallel)")
+            print(f"{'='*60}")
+            
+            # PHASE 1: Parallel extraction of frames from bags using threads
+            extracted_frames = {}
+            
+            # Run parallel extraction with thread pool
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                futures = {}
+                for bag_path in bag_directories:
+                    future = executor.submit(self._extract_bag_worker, bag_path)
+                    futures[future] = bag_path
+                
+                # Collect results as they complete
+                successful_extractions = 0
+                for future in as_completed(futures):
+                    bag_path = futures[future]
+                    try:
+                        frames_data, timestamps, success = future.result()
+                        if success:
+                            extracted_frames[bag_path] = (frames_data, timestamps)
+                            successful_extractions += 1
+                            print(f"✅ Extracted: {Path(bag_path).name} ({len(frames_data)} frames)")
+                        else:
+                            print(f"❌ Failed to extract: {Path(bag_path).name}")
+                    except Exception as e:
+                        print(f"❌ Error extracting {Path(bag_path).name}: {e}")
+                        import traceback
+                        traceback.print_exc()
+            
+            print(f"\n✅ Extraction phase complete: {successful_extractions}/{len(bag_directories)} bags")
+            
+            # PHASE 2: Sequential writing to dataset (must be done in order)
+            print(f"\n{'='*60}")
+            print(f"💾 PHASE 2: Writing frames to dataset (sequential)")
+            print(f"{'='*60}")
+            
+            successful_writes = 0
+            total_episodes_to_write = len(extracted_frames)
             for i, bag_path in enumerate(bag_directories):
-                print(f"\n--- 📁 Processing bag {i+1}/{len(bag_directories)} ---")
+                if bag_path not in extracted_frames:
+                    print(f"⏭️ Skipping {Path(bag_path).name} (extraction failed)")
+                    continue
+                
+                frames_data, timestamps = extracted_frames[bag_path]
+                
+                print(f"\n--- 💾 Writing {successful_writes + 1}/{total_episodes_to_write} ({Path(bag_path).name}) ---")
+                
                 try:
-                    if self.process_bag_file(bag_path):
-                        successful_conversions += 1
+                    if self._write_episode_worker(frames_data, timestamps):
+                        successful_writes += 1
+                        # Release memory by deleting processed frames
+                        del extracted_frames[bag_path]
                 except Exception as e:
-                    print(f"❌ Error processing {bag_path}: {e}")
+                    print(f"❌ Error writing {bag_path}: {e}")
+                    import traceback
+                    traceback.print_exc()
                     continue
             
-            print(f"\n🎉 Successfully converted {successful_conversions}/{len(bag_directories)} bag files")
+            print(f"\n{'='*60}")
+            print(f"🎉 Successfully converted {successful_writes}/{len(bag_directories)} bag files")
+            print(f"{'='*60}")
             
             # Save episode mapping for reference
             self.save_episode_mapping()
@@ -677,6 +736,86 @@ class ROSBag2Converter:
             
             # Shutdown ROS2
             rclpy.shutdown()
+    
+    def _extract_bag_worker(self, bag_path: str) -> Tuple:
+        """Worker function for parallel bag extraction."""
+        try:
+            synchronized_frames = self.get_synchronized_messages(bag_path)
+            if not synchronized_frames:
+                print(f"❌ No synchronized frames found in {bag_path}")
+                return None, None, False
+            
+            # Process frames
+            processed_frames = []
+            timestamps = self.create_regular_timestamps(len(synchronized_frames))
+            
+            for i, frame_data in enumerate(synchronized_frames):
+                frame_dict = {}
+                
+                for topic_name, (msg, original_timestamp) in frame_data.items():
+                    if topic_name in self.image_topics:
+                        image = self.decode_compressed_image_from_msg(msg, downsize=self.downsize_images)
+                        image = np.transpose(image, (2, 0, 1))
+                        feature_key = self.topic_to_feature_key(topic_name, 'observation.images')
+                        frame_dict[feature_key] = image
+                    
+                    elif topic_name in self.joint_state_topics and self.input_mode != "vision_only":
+                        left_hand_state = self.extract_left_hand_state_from_msg(msg)
+                        
+                        if self.input_mode == "vision_pos":
+                            frame_dict["observation.state"] = left_hand_state['position']
+                        elif self.input_mode == "vision_pos_vel":
+                            combined_state = np.concatenate([
+                                left_hand_state['position'],
+                                left_hand_state['velocity']
+                            ])
+                            frame_dict["observation.state"] = combined_state
+                    
+                    elif topic_name in self.action_command_topics:
+                        action = self.extract_controller_command_from_msg(msg)
+                        frame_dict["action"] = action
+                
+                processed_frames.append(frame_dict)
+            
+            return processed_frames, timestamps, True
+        
+        except Exception as e:
+            print(f"❌ Error extracting {bag_path}: {e}")
+            import traceback
+            traceback.print_exc()
+            return None, None, False
+    
+    def _write_episode_worker(self, frames_data: List[Dict], timestamps: List[float]) -> bool:
+        """Write episode data to dataset (sequential, thread-safe)."""
+        try:
+            self.dataset.episode_buffer = self.dataset.create_episode_buffer(self.episode_index)
+            
+            for i, frame_dict in enumerate(frames_data):
+                # Ensure required fields
+                if "next.reward" not in frame_dict:
+                    frame_dict["next.reward"] = np.array([0.0], dtype=np.float32)
+                if "next.done" not in frame_dict:
+                    frame_dict["next.done"] = np.array([False], dtype=bool)
+                
+                self.dataset.add_frame(frame_dict, self.task_description, timestamps[i])
+            
+            # Mark last frame as episode end
+            if self.dataset.episode_buffer is not None and len(self.dataset.episode_buffer["next.done"]) > 0:
+                self.dataset.episode_buffer["next.done"][-1] = np.array([True], dtype=bool)
+            
+            self.dataset.save_episode()
+            
+            print(f"✅ Saved episode {self.episode_index} with {len(frames_data)} frames")
+            self.episode_index += 1
+            return True
+        
+        except Exception as e:
+            print(f"❌ Error writing frames: {e}")
+            import traceback
+            traceback.print_exc()
+            if hasattr(self.dataset, 'episode_buffer') and self.dataset.episode_buffer:
+                self.dataset.episode_buffer = None
+            return False
 
 
 def main():
@@ -720,6 +859,11 @@ def main():
                        choices=["pos_only", "pos_vel"],
                        default="pos_vel",
                        help="Output mode: pos_only (position commands), pos_vel (position + velocity commands)")
+    
+    parser.add_argument("--num-workers", type=int, default=1,
+                       help="Number of parallel workers for bag extraction (default: 1 for sequential). "
+                            "Parallel processing (2-8 workers) speeds up conversion but requires more RAM. "
+                            "Each worker loads a full episode into memory.")
     
     args = parser.parse_args()
     
@@ -767,7 +911,7 @@ def main():
     )
     
     start_time = time.time()
-    converter.convert_bags(bag_directories)
+    converter.convert_bags(bag_directories, num_workers=args.num_workers)
     end_time = time.time()
     
     print(f"Conversion completed in {end_time - start_time:.2f} seconds")
