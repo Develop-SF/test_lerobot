@@ -1,11 +1,47 @@
 # Quick Reference - Testing Branch Workflow
 
-## Setup and Tips
+## Setup, Tips & Troubleshooting
 
-- **Environment Setup**: Follow LeRobot's README to set up the conda environment and install LeRobot locally.
-- **Suppress Verbose Logs**: Verbose Svt[info] logs can be distracting. Set `export SVT_LOG=1` in the terminal to suppress them except in case of errors.
-- **Parallel Conversion**: Use `run_parallel_conversion.sh` to speed up the conversion process via parallel processing of multiple episodes.
-- **Script Configuration**: For conversion scripts, typically only need to edit `BASE_DIR`, `OUTPUT_DIR`, episode count's bag root folder name, `--dataset-name`, and `--task` parameters.
+### Environment Setup
+- **Baseline Setup**: Follow LeRobot's README to set up the conda environment and install LeRobot locally.
+- **FFmpeg & TorchCodec (Critical Fixes)**:
+  - Do **not** use `apt-get` for ffmpeg inside Conda.
+  - Install FFmpeg 7+ via Conda-Forge: `conda install -y -c conda-forge 'ffmpeg>=7.0'`
+  - Install compatible TorchCodec: `pip install torchcodec==0.2.1`
+  - *Verified Stack*: FFmpeg 7 + TorchCodec 0.2.1 + PyTorch 2.6.0.
+
+### Runtime Tips
+- **Suppress Verbose Logs**: Set `export SVT_LOG=1` to suppress distracting info logs.
+- **Parallel Conversion**: Use `run_parallel_conversion.sh` for speed.
+- **Script Config**: Edit simpler parameters (`BASE_DIR`, `--dataset-name`) in conversion scripts rather than deep logic.
+
+### Known Issues & Fixes
+- **`lerobot_dataset.py` Torch Input Error**:
+  - *Issue*: `torch.stack` fails on lists of floats (e.g., timestamps).
+  - *Fix*: Code modified to use `torch.tensor()` which accepts lists, or robustly check types before stacking.
+- **`libtorchcodec` Loading Errors**:
+  - *Issue*: `RuntimeError` due to missing `libavutil.so` or symbol mismatch.
+  - *Fix*: See "FFmpeg & TorchCodec" setup above.
+
+### Validated Command Examples
+
+**Compute Relative Stats:**
+```bash
+python lerobot/scripts/compute_relative_action_stats.py \
+    --config_path /mnt/SF-Shared/dataset/robot_learning/lerobot/eric_plating_v2/training_config.json \
+    --output_path /mnt/SF-Shared/dataset/robot_learning/lerobot/eric_plating_v2/relative_stats.json \
+    --arm_dim 6
+```
+
+**Train with Relative Actions:**
+```bash
+python lerobot/scripts/train_with_relative_actions.py \
+    --config_path /mnt/SF-Shared/dataset/robot_learning/lerobot/eric_plating_v2/training_config.json \
+    --output_dir /mnt/SF-Shared/training/eric_plating_v2_rel \
+    --use_relative_actions \
+    --arm_dim 6 \
+    --relative_stats_path /mnt/SF-Shared/dataset/robot_learning/lerobot/eric_plating_v2/relative_stats.json
+```
 
 ## 🎯 Quick Commands
 
@@ -191,3 +227,43 @@ python -c "import onnxruntime; print(onnxruntime.get_device())"
 ---
 
 For detailed information, see [TESTING_BRANCH_GUIDE.md](TESTING_BRANCH_GUIDE.md)
+
+### 5️⃣ Generate Training Config (Official/Hydra Method)
+
+Instead of writing the JSON manually, use the standard LeRobot training script to generate a valid base configuration (YAML), then convert it to JSON and adapt it.
+
+**1. Generate Base Configuration**
+Run the standard training script for 1 step to generate the config file:
+```bash
+python lerobot/scripts/train.py \
+    policy=diffusion \
+    dataset.repo_id=eric_plating_v2 \
+    env.task=eric_plating_v2 \
+    device=cpu \
+    steps=1 \
+    hydra.run.dir=outputs/config_gen
+```
+> **Flags Explanation:**
+> *   `device=cpu`: Use CPU to avoid unnecessary GPU initialization overhead for just generating a config.
+> *   `steps=1`: Run for only 1 step so the script exits immediately (side-effect: generating the config).
+> *   `hydra.run.dir=...`: Save outputs to a known, fixed directory (`outputs/config_gen`) instead of a timestamped folder.
+
+**2. Retrieve and Convert Config**
+The configuration will be saved at `outputs/config_gen/config.yaml`. Convert this YAML to JSON (e.g., using an online tool or script) to create `training_config.json`.
+
+**3. Manual Adjustments for Custom Script**
+Our custom script (`train_with_relative_actions.py`) requires specific keys that might be missing or different in the standard config:
+
+- **`policy.repo_id`**: This is **REQUIRED** but often missing in local generic runs. Add it manually to the `policy` section:
+  ```json
+  "policy": {
+      "repo_id": "eric_plating_v2_policy",
+      ...
+  }
+  ```
+- **Feature Matching**: Ensure `input_features` and `output_features` match your dataset exactly (check image keys like `observation.images.sync_head_cam`). The standard script attempts to guess them, but verify they are correct.
+- **Paths**: Ensure `dataset.root` points to your local dataset folders if not using Hub.
+
+---
+
+
