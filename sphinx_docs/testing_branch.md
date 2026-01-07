@@ -1,5 +1,7 @@
 # Testing Branch - Complete Workflow Guide
 
+Note: For a concise step-by-step with copy-paste commands, see {doc}`quick_reference`. This guide provides deeper context and troubleshooting.
+
 This guide provides a comprehensive walkthrough for converting ROS bags to datasets, training models, converting to ONNX, and running inference to control robots.
 
 ## Overview of Changes in Testing Branch

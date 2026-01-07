@@ -1,5 +1,7 @@
 # Testing Branch Workflow Diagram
 
+Tip: Use {doc}`quick_reference` for the exact commands. This page focuses on visuals and system flow.
+
 ## Complete Pipeline Flow
 
 ```

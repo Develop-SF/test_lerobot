@@ -1,5 +1,7 @@
 # 📚 Testing Branch Documentation Index
 
+> Prefer the Quick Reference for hands-on steps: see {doc}`quick_reference`. This page summarizes components and links without repeating commands.
+
 Welcome to the comprehensive documentation for the LeRobot Testing Branch!
 
 ---
@@ -7,17 +9,18 @@ Welcome to the comprehensive documentation for the LeRobot Testing Branch!
 ## 🚀 Quick Start
 
 **New to this branch?** Start here:
-1. Read the [Branch Changes Summary](#branch-changes-summary) to understand what's new
-2. Follow the [Complete Workflow Guide](#workflow-guide) for step-by-step instructions
-3. Use the [Quick Reference](#quick-reference) for command-line cheat sheet
-4. Check the [Workflow Diagrams](#workflow-diagrams) for visual understanding
+1. Read the [Branch Changes Summary](#1-branch-changes-summary) to understand what's new
+2. Follow the [Complete Workflow Guide](#2-testing-branch-workflow-guide) for step-by-step instructions
+3. Use the [Quick Reference](#3-quick-reference) for command-line cheat sheet
+4. Check the [Workflow Diagrams](#4-workflow-diagrams) for visual understanding
 
 ---
 
 ## 📖 Documentation Files
 
 ### 1. Branch Changes Summary
-**File:** [BRANCH_CHANGES_SUMMARY.md](BRANCH_CHANGES_SUMMARY.md)
+(1-branch-changes-summary)=
+**File:** {doc}`branch_changes`
 
 **What's inside:**
 - Complete list of changes (38 files, 14,110+ lines)
@@ -30,11 +33,13 @@ Welcome to the comprehensive documentation for the LeRobot Testing Branch!
 - You want to understand what's different from main
 - You need to see the complete feature list
 - You're migrating from main branch
+- You need links; for commands use {doc}`quick_reference`
 
 ---
 
 ### 2. Testing Branch Workflow Guide
-**File:** [TESTING_BRANCH_GUIDE.md](TESTING_BRANCH_GUIDE.md)
+(2-testing-branch-workflow-guide)=
+**File:** {doc}`testing_branch`
 
 **What's inside:**
 - Complete end-to-end workflow (ROS bag → Dataset → Training → ONNX → Inference)
@@ -53,7 +58,8 @@ Welcome to the comprehensive documentation for the LeRobot Testing Branch!
 ---
 
 ### 3. Quick Reference
-**File:** [QUICK_REFERENCE.md](QUICK_REFERENCE.md)
+(3-quick-reference)=
+**File:** {doc}`quick_reference`
 
 **What's inside:**
 - One-liner commands for each step
@@ -71,7 +77,8 @@ Welcome to the comprehensive documentation for the LeRobot Testing Branch!
 ---
 
 ### 4. Workflow Diagrams
-**File:** [WORKFLOW_DIAGRAM.md](WORKFLOW_DIAGRAM.md)
+(4-workflow-diagrams)=
+**File:** {doc}`workflow_diagram`
 
 **What's inside:**
 - Visual pipeline flow

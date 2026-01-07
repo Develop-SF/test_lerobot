@@ -4,21 +4,21 @@ Welcome to the comprehensive documentation for the LeRobot Testing Branch!
 
 ```{toctree}
 :maxdepth: 2
-:caption: Contents:
+:caption: Quick Start & Workflow
 
-overview
-testing_branch
 quick_reference
+testing_branch
+overview
 workflow_diagram
 branch_changes
 ```
 
 ## Quick Links
 
+- {doc}`quick_reference` - Step-by-step setup + commands
 - {doc}`testing_branch` - Complete workflow guide
-- {doc}`quick_reference` - Command cheat sheet  
 - {doc}`workflow_diagram` - Visual diagrams
-- {doc}`branch_changes` - Detailed changes
+- {doc}`branch_changes` (Changelog, optional)
 
 ## Overview
 

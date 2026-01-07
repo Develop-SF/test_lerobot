@@ -24,6 +24,7 @@ myst_enable_extensions = [
     "deflist",
     "tasklist",
 ]
+myst_suppress_warnings = ['myst.xref.missing']
 
 templates_path = ['_templates']
 exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
