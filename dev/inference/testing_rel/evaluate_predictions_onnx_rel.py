@@ -31,7 +31,19 @@ import argparse
 from pathlib import Path
 from typing import Dict, List, Tuple
 import numpy as np
+
+# Set matplotlib backend based on display availability
+import matplotlib
+import os
+if os.getenv('DISPLAY'):
+    # Display available, use interactive backend
+    matplotlib.use('TkAgg')  # or 'Qt5Agg', 'GTkAgg' depending on your system
+else:
+    # Headless system, use non-interactive backend
+    matplotlib.use('Agg')
+
 import matplotlib.pyplot as plt
+
 import json
 from collections import deque
 import time
@@ -408,15 +420,17 @@ class ONNXTensorRTInference:
         """Unnormalize action."""
         if "action" in self.unnorm_stats:
             stats = self.unnorm_stats["action"]
+            action_dim = self.config['action_dim']
+            
             if stats.get("mode") == "min_max":
                 # Action is in [-1, 1], scale back to original range
                 action = (action + 1) / 2  # [-1, 1] -> [0, 1]
-                min_val = stats["min"]
-                max_val = stats["max"]
+                min_val = stats["min"][:action_dim]  # Only use action dimensions
+                max_val = stats["max"][:action_dim]  # Only use action dimensions
                 action = action * (max_val - min_val) + min_val
             elif stats.get("mode") == "mean_std":
-                mean = stats["mean"]
-                std = stats["std"]
+                mean = stats["mean"][:action_dim]  # Only use action dimensions
+                std = stats["std"][:action_dim]    # Only use action dimensions
                 action = action * (std + 1e-8) + mean
         return action
     
@@ -548,10 +562,12 @@ class ONNXTensorRTInference:
             global_cond = global_cond_unflat.reshape(batch_size, -1).astype(np.float32)
             
             # Initialize noise
+            # UNet expects input_dim = action_dim + state_dim (same as training)
+            input_dim = self.config['action_dim'] + self.config['state_dim']
             noise = np.random.randn(
                 batch_size,
                 self.config['horizon'],
-                self.config['action_dim']
+                input_dim
             ).astype(np.float32)
             
             # Denoising loop
@@ -582,7 +598,10 @@ class ONNXTensorRTInference:
                     torch.from_numpy(sample)
                 ).prev_sample.numpy()
             
-            actions = sample
+            # Extract only the action dimensions from the output
+            # sample shape: (batch, horizon, action_dim + state_dim)
+            # We only need the action part
+            actions = sample[:, :, :self.config['action_dim']]
             
             # Extract action chunk
             start = self.config['n_obs_steps'] - 1
@@ -669,7 +688,7 @@ class PredictionEvaluator:
         if not ROS_AVAILABLE:
             raise RuntimeError("ROS2 not available")
         
-        storage_options = rosbag2_py.StorageOptions(uri=str(rosbag_path), storage_id='sqlite3')
+        storage_options = rosbag2_py.StorageOptions(uri=str(rosbag_path), storage_id='mcap')
         converter_options = rosbag2_py.ConverterOptions(
             input_serialization_format='cdr',
             output_serialization_format='cdr'

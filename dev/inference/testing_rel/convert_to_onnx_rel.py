@@ -324,9 +324,11 @@ def export_unet(policy, output_dir: Path, opset_version: int = 17):
     print(f"  Global conditioning dim: {global_cond_dim}")
     
     # Create dummy inputs
+    # UNet expects (B, T, input_dim) where input_dim = action_dim + state_dim
     batch_size = 1
     device = get_model_device(unet)
-    dummy_sample = torch.randn(batch_size, horizon, action_dim, device=device)
+    input_dim = action_dim + state_dim
+    dummy_sample = torch.randn(batch_size, horizon, input_dim, device=device)
     dummy_timestep = torch.randint(0, 100, (batch_size,), device=device, dtype=torch.long)
     dummy_global_cond = torch.randn(batch_size, global_cond_dim, device=device)
     
