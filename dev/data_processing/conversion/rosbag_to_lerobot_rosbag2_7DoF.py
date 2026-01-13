@@ -43,7 +43,7 @@ class ROSBag2Converter:
         downsize_images: bool = True,
         tolerance_s: float = 1.0,
         trim_unmoving_end: bool = True,
-        left_hand_joint_names: Optional[List[str]] = None,
+        right_hand_joint_names: Optional[List[str]] = None,
         input_mode: str = "vision_pos_vel",
         output_mode: str = "pos_vel",
         force: bool = False
@@ -75,20 +75,21 @@ class ROSBag2Converter:
         
         print(f"Converter modes - Input: {input_mode}, Output: {output_mode}")
         
-        # Define left arm joint names (based on actual rosbag analysis)
-        self.left_hand_joint_names = left_hand_joint_names or [
-            'la_shoulder_pan_joint',     # Left arm shoulder pan
-            'la_shoulder_lift_joint',    # Left arm shoulder lift  
-            'la_elbow_joint',            # Left arm elbow
-            'la_wrist_1_joint',          # Left arm wrist 1
-            'la_wrist_2_joint',          # Left arm wrist 2
-            'la_wrist_3_joint'           # Left arm wrist 3
+        # Define right arm joint names with gripper at index 5
+        self.right_hand_joint_names = right_hand_joint_names or [
+            'ra_shoulder_pan_joint',     # 0
+            'ra_shoulder_lift_joint',    # 1
+            'ra_elbow_joint',            # 2
+            'ra_wrist_1_joint',          # 3
+            'ra_wrist_2_joint',          # 4
+            'ra_robotiq_85_left_knuckle_joint', # 5 (Gripper)
+            'ra_wrist_3_joint'           # 6
         ]
         
         # Topic mapping
         self.image_topics = [t for t in observation_topics if 'image' in t and 'compressed' in t]
         self.joint_state_topics = [t for t in observation_topics if 'joint_states' in t]
-        self.action_command_topics = [t for t in self.action_topics if 'trajectory' in t or 'command' in t]
+        self.action_command_topics = [t for t in self.action_topics if 'trajectory' in t or 'command' in t or 'cmd' in t]
         
         self.dataset = None
         self.episode_index = 0
@@ -231,10 +232,10 @@ class ROSBag2Converter:
         
         return image
     
-    def extract_left_hand_state_from_msg(self, msg) -> Dict[str, np.ndarray]:
+    def extract_right_hand_state_from_msg(self, msg) -> Dict[str, np.ndarray]:
         """
-        Extract left hand joint positions and velocities from ROS JointState message.
-        Filters only left hand/arm joints and preserves original data types.
+        Extract right hand joint positions and velocities from ROS JointState message.
+        Filters only right hand/arm joints and preserves original data types.
         Returns dict with 'position' and 'velocity' arrays.
         """
         # Get joint names, positions, and velocities
@@ -243,35 +244,39 @@ class ROSBag2Converter:
         if not hasattr(msg, 'position') or not msg.position:
             raise ValueError("Joint state message has no position data")
         if not hasattr(msg, 'velocity') or not msg.velocity:
-            raise ValueError("Joint state message has no velocity data")
+            # Gripper might not have velocity in some messages, handle gracefully
+            velocities = np.zeros_like(msg.position)
+        else:
+            velocities = np.array(msg.velocity)
             
         joint_names = list(msg.name)
         positions = np.array(msg.position)
-        velocities = np.array(msg.velocity)
         
-        # Find indices of left hand joints
-        left_hand_indices = []
-        for joint_name in self.left_hand_joint_names:
+        # Find indices of right hand joints
+        right_hand_indices = []
+        for joint_name in self.right_hand_joint_names:
             if joint_name in joint_names:
-                left_hand_indices.append(joint_names.index(joint_name))
+                right_hand_indices.append(joint_names.index(joint_name))
         
-        if not left_hand_indices:
-            raise ValueError(f"No left hand joints found in message. Available: {joint_names}")
+        if not right_hand_indices:
+            raise ValueError(f"No right hand joints found in message. Available: {joint_names}")
         
-        # Extract left hand data
-        left_positions = positions[left_hand_indices]
-        left_velocities = velocities[left_hand_indices]
+        # Extract right hand data
+        right_positions = positions[right_hand_indices]
+        right_velocities = velocities[right_hand_indices]
         
         # Validate data
-        if not np.all(np.isfinite(left_positions)):
-            raise ValueError("Left hand positions contain NaN or Inf values")
-        if not np.all(np.isfinite(left_velocities)):
-            raise ValueError("Left hand velocities contain NaN or Inf values")
+        if not np.all(np.isfinite(right_positions)):
+            raise ValueError("Right hand positions contain NaN or Inf values")
+        if not np.all(np.isfinite(right_velocities)):
+            # Warning only, as velocity might be less critical or expectedly NaN in some systems
+            print("Warning: Right hand velocities contain NaN or Inf values")
+            right_velocities = np.nan_to_num(right_velocities)
             
         # Preserve original data type from rosbag (usually float64)
         return {
-            'position': left_positions.astype(positions.dtype),
-            'velocity': left_velocities.astype(velocities.dtype)
+            'position': right_positions.astype(positions.dtype),
+            'velocity': right_velocities.astype(positions.dtype)
         }
     
     def extract_controller_command_from_msg(self, msg) -> np.ndarray:
@@ -318,6 +323,18 @@ class ROSBag2Converter:
         
         else:
             raise ValueError(f"Unknown output_mode: {self.output_mode}")
+            
+    def extract_gripper_command_from_msg(self, msg) -> np.ndarray:
+        """
+        Extract gripper position command from ROS GripperCommand message.
+        """
+        if not hasattr(msg, 'command'):
+             # Some versions might have msg.position directly, but control_msgs usually has .command
+             if hasattr(msg, 'position'):
+                 return np.array([msg.position])
+             raise ValueError("GripperCommand message has no command or position attribute")
+        
+        return np.array([msg.command.position])
     
     def create_regular_timestamps(self, num_frames: int, start_time: float = None) -> np.ndarray:
         """
@@ -381,43 +398,43 @@ class ROSBag2Converter:
                     "names": ["channel", "height", "width"]
                 }
         
-        # Add left hand joint state observation based on input mode
+        # Add right hand joint state observation based on input mode
         if self.joint_state_topics and self.input_mode != "vision_only":
-            num_left_joints = len(self.left_hand_joint_names)
+            num_right_joints = len(self.right_hand_joint_names)
             
             if self.input_mode == "vision_pos":
                 # Position only
                 features["observation.state"] = {
                     "dtype": "float32",  # Converted from rosbag float64
-                    "shape": (num_left_joints,),  # position only for each joint
-                    "names": [f"{joint}_pos" for joint in self.left_hand_joint_names]
+                    "shape": (num_right_joints,),  # position only for each joint
+                    "names": [f"{joint}_pos" for joint in self.right_hand_joint_names]
                 }
             elif self.input_mode == "vision_pos_vel":
                 # Position and velocity
                 features["observation.state"] = {
                     "dtype": "float32",  # Converted from rosbag float64
-                    "shape": (num_left_joints * 2,),  # position + velocity for each joint
-                    "names": ([f"{joint}_pos" for joint in self.left_hand_joint_names] + 
-                             [f"{joint}_vel" for joint in self.left_hand_joint_names])
+                    "shape": (num_right_joints * 2,),  # position + velocity for each joint
+                    "names": ([f"{joint}_pos" for joint in self.right_hand_joint_names] + 
+                             [f"{joint}_vel" for joint in self.right_hand_joint_names])
                 }
         
         # Add action based on output mode
-        num_left_joints = len(self.left_hand_joint_names)
+        num_right_joints = len(self.right_hand_joint_names)
         
         if self.output_mode == "pos_only":
             # Position only output
             features["action"] = {
                 "dtype": "float32",  # Converted from rosbag float64
-                "shape": (num_left_joints,),
-                "names": [f"{joint}_pos_cmd" for joint in self.left_hand_joint_names]
+                "shape": (num_right_joints,),
+                "names": [f"{joint}_pos_cmd" for joint in self.right_hand_joint_names]
             }
         elif self.output_mode == "pos_vel":
             # Position and velocity output
             features["action"] = {
                 "dtype": "float32",  # Converted from rosbag float64
-                "shape": (num_left_joints * 2,),
-                "names": [f"{joint}_pos_cmd" for joint in self.left_hand_joint_names] + 
-                        [f"{joint}_vel_cmd" for joint in self.left_hand_joint_names]
+                "shape": (num_right_joints * 2,),
+                "names": [f"{joint}_pos_cmd" for joint in self.right_hand_joint_names] + 
+                        [f"{joint}_vel_cmd" for joint in self.right_hand_joint_names]
             }
         
         # Add required LeRobot features
@@ -486,20 +503,67 @@ class ROSBag2Converter:
                         frame_dict[feature_key] = image
                     
                     elif topic_name in self.joint_state_topics and self.input_mode != "vision_only":
-                        left_hand_state = self.extract_left_hand_state_from_msg(msg)
+                        right_hand_state = self.extract_right_hand_state_from_msg(msg)
                         
                         if self.input_mode == "vision_pos":
-                            frame_dict["observation.state"] = left_hand_state['position'].astype(np.float32)
+                            frame_dict["observation.state"] = right_hand_state['position'].astype(np.float32)
                         elif self.input_mode == "vision_pos_vel":
                             combined_state = np.concatenate([
-                                left_hand_state['position'],
-                                left_hand_state['velocity']
+                                right_hand_state['position'],
+                                right_hand_state['velocity']
                             ])
                             frame_dict["observation.state"] = combined_state.astype(np.float32)
                     
                     elif topic_name in self.action_command_topics:
-                        action = self.extract_controller_command_from_msg(msg)
-                        frame_dict["action"] = action.astype(np.float32)
+                        if 'trajectory' in topic_name:
+                            # Arm trajectory
+                            arm_action = self.extract_controller_command_from_msg(msg)
+                            # Store temporarily to combine with gripper later
+                            frame_dict["_temp_arm_action"] = arm_action
+                        elif 'gripper' in topic_name:
+                            # Gripper command
+                            gripper_action = self.extract_gripper_command_from_msg(msg)
+                            # Store temporarily to combine with arm later
+                            frame_dict["_temp_gripper_action"] = gripper_action
+                
+                # After iterating all topics for this frame, combine actions if both exist
+                if "_temp_arm_action" in frame_dict:
+                    arm_act = frame_dict.pop("_temp_arm_action")
+                    if "_temp_gripper_action" in frame_dict:
+                        gripper_act = frame_dict.pop("_temp_gripper_action")
+                    else:
+                        # Fallback if gripper missing: pad with 0
+                        print(f"⚠️ Warning: Gripper action missing at frame {i}")
+                        gripper_act = np.zeros(1, dtype=arm_act.dtype)
+                    
+                    # Interleave gripper at index 5 to match state
+                    if self.output_mode == "pos_only":
+                        # Arm has 6 pos, gripper has 1 pos
+                        # Result: [arm_pos (5), gripper_pos (1), arm_pos (1)] -> Total 7
+                        combined = np.concatenate([
+                            arm_act[:5],
+                            gripper_act,
+                            arm_act[5:6]
+                        ])
+                    else:
+                        # Arm has 12: [p0..p5, v0..v5]
+                        # Gripper has 1: [gp] (assuming no vel command)
+                        # Result: [p0..p4, gp, p5, v0..v4, gv, v5] -> Total 14
+                        arm_pos = arm_act[:6]
+                        arm_vel = arm_act[6:12]
+                        gripper_pos = gripper_act[0:1]
+                        gripper_vel = np.zeros_like(gripper_pos) # Gripper v-cmd unavailable
+                        
+                        combined = np.concatenate([
+                            arm_pos[:5], gripper_pos, arm_pos[5:6],
+                            arm_vel[:5], gripper_vel, arm_vel[5:6]
+                        ])
+                    
+                    frame_dict["action"] = combined.astype(np.float32)
+                elif "_temp_gripper_action" in frame_dict:
+                    # Rare case: gripper but no arm
+                    frame_dict.pop("_temp_gripper_action")
+                    print(f"⚠️ Warning: Arm action missing but gripper present at frame {i}")
                 
                 processed_frames.append(frame_dict)
             
@@ -708,12 +772,15 @@ def main():
                        help="ROS topics for observations (two cameras + joint states)")
     
     parser.add_argument("--action-topics", nargs="+",
-                       default=["/sync/la_trajectory_controller/joint_trajectory"],
-                       help="ROS topics for action commands (joint trajectory controller)")
+                       default=[
+                           "/sync/ra_trajectory_controller/joint_trajectory",
+                           "/sync/sns_right_gripper_cmd"
+                       ],
+                       help="ROS topics for action commands (arm trajectory + gripper command)")
     
-    parser.add_argument("--left-hand-joints", nargs="+",
-                       default=None,  # Will use default from converter: la_shoulder_pan_joint, la_shoulder_lift_joint, la_elbow_joint, la_wrist_1_joint, la_wrist_2_joint, la_wrist_3_joint
-                       help="Names of left arm joints to extract from joint states")
+    parser.add_argument("--right-hand-joints", nargs="+",
+                       default=None,  # Will use default from converter: ra_shoulder_pan_joint, ...
+                       help="Names of right arm joints to extract from joint states")
     
     # Flexible input/output mode arguments
     parser.add_argument("--input-mode",
@@ -730,7 +797,6 @@ def main():
                        help="Number of parallel workers for bag extraction (default: 1 for sequential). "
                             "Parallel processing (2-8 workers) speeds up conversion but requires more RAM. "
                             "Each worker loads a full episode into memory.")
-    
     parser.add_argument("--force", action="store_true", help="Overwrite existing dataset if it exists")
     
     args = parser.parse_args()
@@ -773,7 +839,7 @@ def main():
         downsize_images=not args.no_downsize,
         tolerance_s=args.tolerance,
         trim_unmoving_end=not args.no_trim_unmoving,
-        left_hand_joint_names=args.left_hand_joints,
+        right_hand_joint_names=args.right_hand_joints,
         input_mode=args.input_mode,
         output_mode=args.output_mode,
         force=args.force

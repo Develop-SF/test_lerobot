@@ -15,13 +15,47 @@ python rosbag_to_lerobot_rosbag2.py \
     --output-mode pos_vel
 ```
 
-**Real example:**
+## 7-DoF Converter (UR10e + Gripper)
+
+Use this specialized converter for 7-DoF systems to handle 6 arm joints + 1 gripper joint.
+
+```bash
+cd dev/data_processing/conversion
+python3 rosbag_to_lerobot_rosbag2_7DoF.py \
+    /path/to/rosbags \
+    --output-dir /path/to/dataset \
+    --dataset-name picknplace_7dof \
+    --task "picknplace_7dof" \
+    --input-mode vision_pos \
+    --output-mode pos_only
+```
+
+### 7-DoF Real Example
+```bash
+python3 dev/data_processing/conversion/rosbag_to_lerobot_rosbag2_7DoF.py \
+    /mnt/nas/rosbags/20260109_picknplace/normal/ \
+    --output-dir /mnt/nas/dataset/robot_learning/lerobot/picknplace_7dof_normal \
+    --dataset-name picknplace_7dof_normal \
+    --task "picknplace_7dof_normal" \
+    --input-mode vision_pos \
+    --output-mode pos_only
+```
+
+## Standard Converter Real Examples
 ```bash
 cd dev/data_processing/conversion
 python rosbag_to_lerobot_rosbag2.py \
-    /mnt/SF-Shared/rosbags/20251222_eric_plating_v2/ \
-    --output-dir /mnt/SF-Shared/dataset/robot_learning/lerobot/eric_plating_v2 \
+    /mnt/nas/rosbags/20251222_eric_plating_v2/ \
+    --output-dir /mnt/nas/dataset/robot_learning/lerobot/eric_plating_v2 \
     --dataset-name eric_plating_v2 \
+    --fps 20 \
+    --input-mode vision_pos \
+    --output-mode pos_vel
+
+python rosbag_to_lerobot_rosbag2.py \
+    /mnt/nas/rosbags/20260109_picknplace/normal/ \
+    --output-dir /mnt/nas/dataset/robot_learning/lerobot/picknplace_6dof \
+    --dataset-name picknplace_6dof \
     --fps 20 \
     --input-mode vision_pos \
     --output-mode pos_vel
@@ -45,10 +79,44 @@ python inspect_dataset.py /path/to/dataset
 
 **Real example:**
 ```bash
-python inspect_dataset.py /mnt/SF-Shared/dataset/robot_learning/lerobot/eric_plating_v2
+python inspect_dataset.py /mnt/nas/dataset/robot_learning/lerobot/eric_plating_v2
 ```
 
-## Input/Output Modes
+## Review Dataset
+
+### Single Episode (Rerun Viewer)
+
+First, install the required dependency:
+
+```bash
+pip install rerun-sdk
+```
+
+Then, visualize a single episode:
+
+```bash
+python3 -m lerobot.scripts.visualize_dataset --root /path/to/dataset --episode-index 0 --repo-id dataset_name
+```
+
+**Real example:**
+```bash
+python3 -m lerobot.scripts.visualize_dataset --root /mnt/nas/dataset/robot_learning/lerobot/picknplace_6dof/ --episode-index 0 --repo-id picknplace_6dof
+```
+
+### Multiple Episodes (HTML Viewer)
+
+Visualize multiple episodes interactively:
+
+```bash
+python3 -m lerobot.scripts.visualize_dataset_html --root /path/to/dataset --repo-id /dataset_name --port 9099
+```
+
+**Real example:**
+```bash
+python3 -m lerobot.scripts.visualize_dataset_html --root /mnt/nas/dataset/robot_learning/lerobot/picknplace_6dof/ --repo-id /picknplace_6dof --port 9099
+```
+
+Then open `http://localhost:9099` in your browser to navigate between episodes.
 
 | Mode | Description | Observation Dim | Action Dim |
 |------|-------------|----------------|------------|

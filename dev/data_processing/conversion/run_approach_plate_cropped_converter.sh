@@ -8,8 +8,8 @@ eval "$(conda shell.bash hook)"
 conda activate lerobot
 
 # Configuration
-BASE_DIR="/mnt/SF-Shared/rosbags/20251222_eric_plating_v2"
-OUTPUT_DIR="/mnt/SF-Shared/dataset/robot_learning/lerobot/eric_plating_v2_cropped"
+BASE_DIR="/mnt/nas/rosbags/20251222_eric_plating_v2"
+OUTPUT_DIR="/mnt/nas/dataset/robot_learning/lerobot/eric_plating_v2_cropped"
 MAPPING_FILE=""
 
 # suppress verbose SVT logs

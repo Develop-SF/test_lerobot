@@ -23,8 +23,8 @@ python dev/inference/testing_rel/inference_node_onnx_rel.py \
 **Real example:**
 ```bash
 python dev/inference/testing_rel/inference_node_onnx_rel.py \
-    --checkpoint /mnt/SF-Shared/dataset/robot_learning/lerobot/eric_plating_v2/runs/eric_plating_v2_rel_2026-01-06_23-03-49/checkpoints/last \
-    --onnx-dir /mnt/SF-Shared/dataset/robot_learning/lerobot/eric_plating_v2/runs/eric_plating_v2_rel_2026-01-06_23-03-49/onnx_models \
+    --checkpoint /mnt/nas/dataset/robot_learning/lerobot/eric_plating_v2/runs/eric_plating_v2_rel_2026-01-06_23-03-49/checkpoints/last \
+    --onnx-dir /mnt/nas/dataset/robot_learning/lerobot/eric_plating_v2/runs/eric_plating_v2_rel_2026-01-06_23-03-49/onnx_models \
     --frequency 20.0
 ```
 
