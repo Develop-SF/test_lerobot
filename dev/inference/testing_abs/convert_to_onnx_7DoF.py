@@ -74,7 +74,7 @@ class RGBEncoderCoreONNX(torch.nn.Module):
 
 
 
-def export_rgb_encoder(policy, output_dir: Path, opset_version: int = 17):
+def export_rgb_encoder(policy, output_dir: Path, opset_version: int = 18):
     """
     Export RGB encoder to ONNX.
     
@@ -210,7 +210,7 @@ def export_rgb_encoder(policy, output_dir: Path, opset_version: int = 17):
     return str(output_path)
 
 
-def export_unet(policy, output_dir: Path, opset_version: int = 17):
+def export_unet(policy, output_dir: Path, opset_version: int = 18):
     """
     Export UNet denoising model to ONNX.
     
@@ -511,7 +511,7 @@ def main():
     parser.add_argument(
         "--opset-version",
         type=int,
-        default=17,
+        default=18,
         help="ONNX opset version"
     )
     parser.add_argument(

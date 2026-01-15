@@ -100,25 +100,26 @@ class ONNXTensorRTInference:
         else:
             self.center_crop = None
 
-        # Right arm joint names (7DOF configuration) - gripper at index 5, wrist_3 at index 6
-        # This matches the dataset ordering from conversion script
+        # Right arm joint names (7DOF configuration) - MUST MATCH DATASET CONVERSION ORDER
+        # Dataset order from rosbag_to_lerobot_rosbag2_7DoF.py: gripper at index 5, wrist_3 at index 6
         self.left_arm_joints = [
             'ra_shoulder_pan_joint',
             'ra_shoulder_lift_joint',
             'ra_elbow_joint',
             'ra_wrist_1_joint',
             'ra_wrist_2_joint',
-            'ra_wrist_3_joint'
+            'ra_robotiq_85_left_knuckle_joint'  # gripper (index 5 in dataset)
         ]
-        # Full 7DOF joint names for reporting (matching dataset order)
+        # Full 7DOF joint names for reporting (MUST MATCH DATASET ORDER)
+        # Dataset order: shoulder_pan, shoulder_lift, elbow, wrist_1, wrist_2, GRIPPER, wrist_3
         self.all_joint_names = [
             'ra_shoulder_pan_joint',     # 0
             'ra_shoulder_lift_joint',    # 1
             'ra_elbow_joint',            # 2
             'ra_wrist_1_joint',          # 3
             'ra_wrist_2_joint',          # 4
-            'ra_wrist_3_joint',          # 5
-            'gripper'                    # 6
+            'ra_robotiq_85_left_knuckle_joint',  # 5 (GRIPPER - per dataset conversion)
+            'ra_wrist_3_joint'           # 6 (WRIST_3 - per dataset conversion)
         ]
         
         # Observation and action queues (matching DiffusionPolicy.reset())
@@ -336,19 +337,20 @@ class ONNXTensorRTInference:
         return image_processed
     
     def extract_joint_positions_msg(self, joint_state_msg, gripper_msg=None) -> np.ndarray:
-        """Extract arm joint positions + gripper in correct 7DOF order."""
+        """Extract arm joint positions + gripper in correct 7DOF order matching dataset."""
         joint_names = list(joint_state_msg.name)
         positions = np.array(joint_state_msg.position, dtype=np.float32)
         
-        # Define joint order to match dataset (wrist_3 at index 5, gripper at index 6)
+        # Define joint order to match dataset conversion (gripper at index 5, wrist_3 at index 6)
+        # This MUST match rosbag_to_lerobot_rosbag2_7DoF.py ordering
         ordered_joints = [
             'ra_shoulder_pan_joint',     # 0
             'ra_shoulder_lift_joint',    # 1
             'ra_elbow_joint',            # 2
             'ra_wrist_1_joint',          # 3
             'ra_wrist_2_joint',          # 4
-            'ra_wrist_3_joint',          # 5
-            'ra_robotiq_85_left_knuckle_joint'  # 6 (GRIPPER)
+            'ra_robotiq_85_left_knuckle_joint',  # 5 (GRIPPER)
+            'ra_wrist_3_joint'           # 6 (WRIST_3)
         ]
         
         # Extract positions in correct order
@@ -385,25 +387,48 @@ class ONNXTensorRTInference:
                 state = state * 2 - 1  # Scale to [-1, 1]
         return state
     
-    def _normalize_image(self, image: np.ndarray) -> np.ndarray:
-        """Normalize image observation."""
-        # Try different possible keys (with both underscores and periods)
-        possible_keys = [
-            "observation.image",
-            "observation.images.sync_left_arm_cam",
-            "observation.images.sync.left.arm.cam",
-            "observation.images.sync_head_cam",
-            "observation.images.sync.head.cam"
-        ]
+    def _normalize_image(self, image: np.ndarray, camera_key: str) -> np.ndarray:
+        """
+        Normalize image observation using camera-specific stats.
         
-        for key in possible_keys:
-            if key in self.norm_stats:
-                stats = self.norm_stats[key]
-                if stats.get("mode") == "mean_std":
-                    mean = stats["mean"].reshape(3, 1, 1)
-                    std = stats["std"].reshape(3, 1, 1)
-                    image = (image - mean) / (std + 1e-8)
-                break
+        Args:
+            image: Image array (C, H, W)
+            camera_key: Camera key from config (e.g., 'observation.images.sync_front_cam')
+        
+        Returns:
+            Normalized image
+        """
+        # Try the exact key first
+        if camera_key in self.norm_stats:
+            stats = self.norm_stats[camera_key]
+            if stats.get("mode") == "mean_std":
+                mean = stats["mean"].reshape(3, 1, 1)
+                std = stats["std"].reshape(3, 1, 1)
+                image = (image - mean) / (std + 1e-8)
+                return image
+        
+        # Try converting underscores to dots
+        alt_key = camera_key.replace('_', '.')
+        if alt_key in self.norm_stats:
+            stats = self.norm_stats[alt_key]
+            if stats.get("mode") == "mean_std":
+                mean = stats["mean"].reshape(3, 1, 1)
+                std = stats["std"].reshape(3, 1, 1)
+                image = (image - mean) / (std + 1e-8)
+                return image
+        
+        # Try converting dots to underscores
+        alt_key = camera_key.replace('.', '_')
+        if alt_key in self.norm_stats:
+            stats = self.norm_stats[alt_key]
+            if stats.get("mode") == "mean_std":
+                mean = stats["mean"].reshape(3, 1, 1)
+                std = stats["std"].reshape(3, 1, 1)
+                image = (image - mean) / (std + 1e-8)
+                return image
+        
+        print(f"Warning: No normalization stats found for {camera_key}")
+        print(f"Available keys: {list(self.norm_stats.keys())}")
         return image
     
     def _unnormalize_action(self, action: np.ndarray) -> np.ndarray:
@@ -475,16 +500,16 @@ class ONNXTensorRTInference:
         left_processed = self.preprocess_image(left_image)
         head_processed = self.preprocess_image(head_image)
         
-        # Normalize images
-        left_normalized = self._normalize_image(left_processed)
-        head_normalized = self._normalize_image(head_processed)
-        
-        # Map normalized images to their config keys
+        # Map images to their config keys and normalize with camera-specific stats
         batch_images = {}
         if 'left' in self.camera_key_map:
-            batch_images[self.camera_key_map['left']] = left_normalized
+            left_key = self.camera_key_map['left']
+            left_normalized = self._normalize_image(left_processed, left_key)
+            batch_images[left_key] = left_normalized
         if 'head' in self.camera_key_map:
-            batch_images[self.camera_key_map['head']] = head_normalized
+            head_key = self.camera_key_map['head']
+            head_normalized = self._normalize_image(head_processed, head_key)
+            batch_images[head_key] = head_normalized
             
         # Stack in the exact order defined by the model config
         images_stacked = np.stack([batch_images[key] for key in self.image_features], axis=0)
@@ -618,6 +643,8 @@ class PredictionEvaluator:
         
         # Left arm joint names
         self.left_arm_joints = self.inference.left_arm_joints
+        # All joint names (including gripper) for 7DOF
+        self.all_joint_names = self.inference.all_joint_names
     
     def load_rosbag_data(self, rosbag_path: str, max_samples: int = 100) -> Dict[str, List]:
         """Load synchronized data from rosbag."""
@@ -664,7 +691,7 @@ class PredictionEvaluator:
         return self.inference.extract_joint_positions_msg(joint_msg)
     
     def extract_ground_truth_from_command(self, command_msg, gripper_msg=None) -> np.ndarray:
-        """Extract command positions in correct 7DOF order matching dataset."""
+        """Extract command positions in correct 7DOF order matching dataset conversion."""
         if not hasattr(command_msg, 'points') or not command_msg.points:
             raise ValueError("JointTrajectory message has no trajectory points")
         
@@ -682,11 +709,12 @@ class PredictionEvaluator:
         else:
             gripper_value = np.array([0.0], dtype=np.float32)
         
-        # Interleave gripper at index 5 to match dataset ordering:
-        # [shoulder_pan, shoulder_lift, elbow, wrist_1, wrist_2, GRIPPER, wrist_3]
+        # CRITICAL: Match dataset conversion order from rosbag_to_lerobot_rosbag2_7DoF.py
+        # Dataset order: [shoulder_pan, shoulder_lift, elbow, wrist_1, wrist_2, GRIPPER, wrist_3]
+        # Interleave gripper at index 5 (between wrist_2 and wrist_3)
         combined = np.concatenate([
-            arm_positions[:5],   # First 5 arm joints
-            gripper_value,       # Gripper at index 5  
+            arm_positions[:5],   # First 5 arm joints (shoulder_pan through wrist_2)
+            gripper_value,       # Gripper at index 5
             arm_positions[5:6]   # wrist_3 at index 6
         ])
         
