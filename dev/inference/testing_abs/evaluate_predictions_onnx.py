@@ -594,7 +594,7 @@ class PredictionEvaluator:
         if not ROS_AVAILABLE:
             raise RuntimeError("ROS2 not available")
         
-        storage_options = rosbag2_py.StorageOptions(uri=str(rosbag_path), storage_id='sqlite3')
+        storage_options = rosbag2_py.StorageOptions(uri=str(rosbag_path), storage_id='mcap')
         converter_options = rosbag2_py.ConverterOptions(
             input_serialization_format='cdr',
             output_serialization_format='cdr'
