@@ -5,9 +5,16 @@ Run ROS2 inference nodes to control the robot.
 ## Absolute (ONNX)
 
 ```bash
+# Standard
 python dev/inference/testing_abs/inference_node_onnx.py \
     --checkpoint /path/to/run_abs \
     --onnx-dir /path/to/run_abs/onnx_models \
+    --frequency 20.0
+
+# 7-DoF (Pick-N-Place)
+python3 dev/inference/testing_abs/inference_node_onnx_7DoF.py \
+    --checkpoint /mnt/nas/models/picknplace_7dof_diffusion/baseline \
+    --onnx-dir /mnt/nas/models/picknplace_7dof_diffusion/baseline/onnx \
     --frequency 20.0
 ```
 

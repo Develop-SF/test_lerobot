@@ -272,6 +272,7 @@ python3 -m lerobot.scripts.train \
     --wandb.enable True \
     --wandb.project eric_plating_v2 \
     --wandb.entity shennongshi \
+    --wandb.disable_artifact True \
     --job_name eric_plating_v2_diffusion_baseline \
     --output_dir  /mnt/nas/dataset/robot_learning/lerobot/eric_plating_v2/models/eric_plating_v2_diffusion/baseline
 
@@ -292,6 +293,7 @@ python3 -m lerobot.scripts.train \
     --wandb.enable True \
     --wandb.project picknplace_7dof_normal \
     --wandb.entity shennongshi \
+    --wandb.disable_artifact True \
     --job_name picknplace_7dof_diffusion_baseline \
     --output_dir /mnt/nas/models/picknplace_7dof_diffusion/baseline
 ```

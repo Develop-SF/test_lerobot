@@ -104,7 +104,8 @@ Welcome to the comprehensive documentation for the LeRobot Testing Branch!
 **Location:** `dev/data_processing/conversion/`
 
 **Key Files:**
-- `rosbag_to_lerobot_rosbag2.py` - Standard converter
+- `rosbag_to_lerobot_rosbag2.py` - **Standard 6-DoF converter** (left arm camera + left arm joints)
+- `rosbag_to_lerobot_rosbag2_7DoF.py` - **7-DoF converter** for 6 arm joints + 1 gripper (right arm)
 - `rosbag_to_lerobot_cropped_trimmed.py` - Advanced converter
 - `run_approach_new_converter.sh` - Shell script example
 
@@ -113,6 +114,11 @@ Welcome to the comprehensive documentation for the LeRobot Testing Branch!
 - Supports multiple input/output modes
 - Custom image preprocessing
 - Episode trimming
+
+**Configuration Defaults:**
+- **Cameras:** Left arm camera (`/sync/emily01/left_arm/...`) + Head camera (front camera is commented out)
+- **Arm Joints:** Left arm joints (`la_shoulder_pan_joint`, etc.)
+- **Commands:** `/sync/la_trajectory_controller/joint_trajectory`
 
 **Quick command:**
 ```bash
@@ -168,9 +174,9 @@ python lerobot/scripts/train_with_relative_actions.py \
 - [TESTING_GUIDE.md](dev/inference/testing_abs/TESTING_GUIDE.md) - Testing procedures
 
 **Key Files:**
-- `convert_to_onnx.py` - ONNX conversion
-- `inference_node_onnx.py` - ONNX inference node
-- `evaluate_predictions_onnx.py` - Evaluation
+- `convert_to_onnx.py` / `convert_to_onnx_7DoF.py` - ONNX conversion
+- `inference_node_onnx.py` / `inference_node_onnx_7DoF.py` - ONNX inference node
+- `evaluate_predictions_onnx.py` / `evaluate_predictions_onnx_7DoF.py` - Evaluation
 
 **What it does:**
 - Convert PyTorch models to ONNX
@@ -179,13 +185,18 @@ python lerobot/scripts/train_with_relative_actions.py \
 
 **Quick commands:**
 ```bash
-# Convert to ONNX
+# Convert to ONNX (Standard)
 python convert_to_onnx.py \
     --checkpoint /path/to/checkpoint \
     --output-dir ./onnx_models
 
-# Run inference
-python inference_node_onnx.py \
+# Convert to ONNX (7-DoF)
+python3 convert_to_onnx_7DoF.py \
+    --checkpoint /path/to/checkpoint \
+    --output ./onnx_models
+
+# Run inference (7-DoF)
+python3 inference_node_onnx_7DoF.py \
     --checkpoint /path/to/checkpoint \
     --onnx-dir ./onnx_models \
     --device cuda \

@@ -750,7 +750,11 @@ class ROSBag2Converter:
 
 def main():
     parser = argparse.ArgumentParser(description="Convert pre-synchronized ROS2 bags to LeRobot dataset using rosbag2_py")
-    parser.add_argument("bag_dir", help="Directory containing bag files")
+    parser.add_argument(
+        "bag_dirs",
+        nargs="+",
+        help="One or more directories containing bag files"
+    )
     parser.add_argument("--output-dir", "-o", required=True, help="Output directory for LeRobot dataset")
     parser.add_argument("--dataset-name", "-n", default="rosbag_dataset", help="Name for the dataset")
     parser.add_argument("--fps", type=int, default=10, help="Dataset FPS (default: 10)")
@@ -801,29 +805,26 @@ def main():
     
     args = parser.parse_args()
     
-    # Find bag directories
-    bag_base_dir = Path(args.bag_dir)
-    if not bag_base_dir.exists():
-        print(f"❌ Error: Directory {bag_base_dir} does not exist")
-        sys.exit(1)
-    
+    # Find bag directories from all provided parent dirs
     bag_directories = []
-    for item in bag_base_dir.iterdir():
-        if item.is_dir():
-            # Check for bag files (both db3 and any bag format files)
-            db3_files = list(item.glob("*.db3"))
-            bag_files = list(item.glob("*.bag")) + list(item.glob("*.mcap"))
-            if db3_files or bag_files:
-                bag_directories.append(str(item))
-    
+    for bag_base_dir_str in args.bag_dirs:
+        bag_base_dir = Path(bag_base_dir_str)
+        if not bag_base_dir.exists():
+            print(f"❌ Error: Directory {bag_base_dir} does not exist")
+            sys.exit(1)
+        for item in bag_base_dir.iterdir():
+            if item.is_dir():
+                # Check for bag files (db3, bag, or mcap format)
+                db3_files = list(item.glob("*.db3"))
+                bag_files = list(item.glob("*.bag"))
+                mcap_files = list(item.glob("*.mcap"))
+                if db3_files or bag_files or mcap_files:
+                    bag_directories.append(str(item))
     bag_directories.sort()
-    
     # Limit episodes if requested
     if args.max_episodes:
         bag_directories = bag_directories[:args.max_episodes]
-    
     print(f"Found {len(bag_directories)} bag directories")
-    
     if not bag_directories:
         print("No bag directories found")
         sys.exit(1)

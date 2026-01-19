@@ -701,7 +701,8 @@ def main():
     # Topic specification
     parser.add_argument("--observation-topics", nargs="+", 
                        default=[
-                           "/sync/emily01/front/color/image_raw/compressed",
+                           # "/sync/emily01/front/color/image_raw/compressed",
+                           "/sync/emily01/left_arm/color/image_raw/compressed",
                            "/sync/emily01/head/color/image_raw/compressed", 
                            "/sync/joint_states"
                        ],

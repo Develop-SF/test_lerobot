@@ -2,6 +2,8 @@
 
 Convert ROS bags to LeRobot datasets.
 
+> **Camera & Arm Configuration:** Standard converter defaults to **left arm camera** (`left_arm_cam`) and **left arm joints** (`la_*`). The front camera is commented out. Use the 7-DoF converter for systems with 6 arm joints + 1 gripper joint.
+
 ## Standard Converter
 
 ```bash
@@ -37,6 +39,19 @@ python3 dev/data_processing/conversion/rosbag_to_lerobot_rosbag2_7DoF.py \
     --output-dir /mnt/nas/dataset/robot_learning/lerobot/picknplace_7dof_normal \
     --dataset-name picknplace_7dof_normal \
     --task "picknplace_7dof_normal" \
+    --input-mode vision_pos \
+    --output-mode pos_only
+```
+
+### 7-DoF Multiple Bags Example
+```bash
+python3 dev/data_processing/conversion/rosbag_to_lerobot_rosbag2_7DoF.py \
+    /mnt/nas/rosbags/20260109_picknplace/normal \
+    /mnt/nas/rosbags/20260109_picknplace/tilted \
+    /mnt/nas/rosbags/20260109_picknplace/tipover \
+    --output-dir /mnt/nas/dataset/robot_learning/lerobot/picknplace_7dof \
+    --dataset-name picknplace_7dof \
+    --task "picknplace_7dof" \
     --input-mode vision_pos \
     --output-mode pos_only
 ```

@@ -5,6 +5,7 @@ Use this page for runtime tips and quick fixes for common issues.
 ## Runtime Tips
 - **Suppress Verbose Logs**: Set `export SVT_LOG=1` to suppress distracting info logs.
 - **Parallel Conversion**: Use `run_parallel_conversion.sh` for speed.
+- **Overwrite Existing Dataset**: Use the `--force` flag with conversion scripts (e.g., `rosbag_to_lerobot_rosbag2.py --force`) to overwrite an existing output directory. Use this with caution as it overwrites the previous content.
 - **Script Config**: Edit simpler parameters (`BASE_DIR`, `--dataset-name`) in conversion scripts rather than deep logic.
 
 ## Known Issues & Fixes
@@ -29,6 +30,20 @@ Use this page for runtime tips and quick fixes for common issues.
     conda install -c conda-forge opencv libjpeg-turbo libtiff -y
     ```
   - This ensures all image codec dependencies (libjpeg, libtiff, libpng) are consistent within the conda environment.
+
+## Docker Training Optimization
+### Slow Training/Dataloading in Docker
+- **Problem**: `train/dataloading_s` is high (e.g., > 0.1s) and GPU utilization drops to 0% intermittently.
+- **Verification**: Run `nvidia-smi dmon -s u`.
+  - ✅ **Good**: `sm` (Streaming Multiprocessor) stays high (90-100%), `dec` is 0% (CPU decoding is fast enough).
+  - ❌ **Bad**: `sm` fluctuates (100% $\to$ 0%), indicating the CPU is still the bottleneck. Check the CPU throttling in Docker stats `cat /sys/fs/cgroup/cpu.stat | grep throttled_usec` to see if this value increases over time radpidly. If so, the cpu is being throttled due to insufficient allocation.
+- **Root Cause**: Misunderstanding Docker CPU limits. The `--cpus N` flag limits the container to $N$ logical threads, not physical cores. If `num_workers` is too high relative to $N$, the CPU cannot decode video fast enough (AVX-512 workload), causing GPU starvation.
+- **Solution (Formula)**: Allocate enough Logical Threads to cover all workers plus system overhead.
+  - **Docker CPUs** $\approx$ `num_workers + 2`
+- **Recommended Configuration**:
+  - **Docker Limit**: Set `--cpus 10` (or higher) to provide enough raw power for `num_workers: 8`.
+  - **Shared Memory**: Use `--shm-size=16g` to prevent DataLoader crashes (Bus Error).
+
 
 ## 7-DoF Training & Conversion Troubleshooting
 - **Dataset Timestamp Validation Error**:

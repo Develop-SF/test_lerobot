@@ -121,7 +121,7 @@ class ONNXTensorRTInference:
         
         # Image preprocessing parameters (from lerobot_inference.py)
         # Head camera (Top view): Crop (260, 135, 178, 224) then Rotate 90° Clockwise
-        # Front Camera: Resize to (224, 178)
+        # Left arm camera: Resize to (224, 178)
         self.crop_box = (260, 135, 178, 224)  # (x, y, w, h) for top view
         self.target_size = (224, 178)  # (width, height) - final size for both cameras
         
@@ -131,14 +131,14 @@ class ONNXTensorRTInference:
         else:
             self.center_crop = None
 
-        # Right arm joint names
-        self.right_arm_joints = [
-            'ra_shoulder_pan_joint',
-            'ra_shoulder_lift_joint',
-            'ra_elbow_joint',
-            'ra_wrist_1_joint',
-            'ra_wrist_2_joint',
-            'ra_wrist_3_joint'
+        # Left arm joint names
+        self.left_arm_joints = [
+            'la_shoulder_pan_joint',
+            'la_shoulder_lift_joint',
+            'la_elbow_joint',
+            'la_wrist_1_joint',
+            'la_wrist_2_joint',
+            'la_wrist_3_joint'
         ]
         
         # Observation and action queues (matching DiffusionPolicy.reset())
@@ -150,7 +150,7 @@ class ONNXTensorRTInference:
         
         print(f"\nImage preprocessing:")
         print(f"  - Head camera: Crop {self.crop_box} → Rotate 90° CW → {self.target_size}")
-        print(f"  - Front camera: Resize to {self.target_size}")
+        print(f"  - Left arm camera: Resize to {self.target_size}")
     
     def reset(self):
         """Clear observation and action queues."""
@@ -238,7 +238,7 @@ class ONNXTensorRTInference:
         
         # HARDCODED ORDER TO MATCH PYTORCH VERSION
         self.image_features = [
-            'observation.images.sync_front_cam',
+            'observation.images.sync_left_arm_cam',
             'observation.images.sync_head_cam'
         ]
         print(f"  ✓ Loaded image features order (HARDCODED): {self.image_features}")
@@ -248,8 +248,8 @@ class ONNXTensorRTInference:
         for key in self.image_features:
             if 'head' in key:
                 self.camera_key_map['head'] = key
-            elif 'front' in key:
-                self.camera_key_map['front'] = key
+            elif 'left' in key:
+                self.camera_key_map['left'] = key
         
         print(f"  ✓ Camera key map: {self.camera_key_map}")
     
@@ -356,19 +356,19 @@ class ONNXTensorRTInference:
         return image_processed
     
     def extract_joint_positions_msg(self, joint_state_msg) -> np.ndarray:
-        """Extract right arm joint positions from ROS JointState message."""
+        """Extract left arm joint positions from ROS JointState message."""
         joint_names = list(joint_state_msg.name)
         positions = np.array(joint_state_msg.position, dtype=np.float32)
         
-        right_arm_indices = []
-        for joint_name in self.right_arm_joints:
+        left_arm_indices = []
+        for joint_name in self.left_arm_joints:
             if joint_name in joint_names:
-                right_arm_indices.append(joint_names.index(joint_name))
+                left_arm_indices.append(joint_names.index(joint_name))
         
-        if len(right_arm_indices) != 6:
-            raise ValueError(f"Expected 6 right arm joints, found {len(right_arm_indices)}")
+        if len(left_arm_indices) != 6:
+            raise ValueError(f"Expected 6 left arm joints, found {len(left_arm_indices)}")
         
-        return positions[right_arm_indices]
+        return positions[left_arm_indices]
     
     def preprocess_image(self, image: np.ndarray) -> np.ndarray:
         """Preprocess image for model input (CHW format, normalized)."""
@@ -400,8 +400,8 @@ class ONNXTensorRTInference:
         # Try different possible keys (with both underscores and periods)
         possible_keys = [
             "observation.image",
-            "observation.images.sync_front_cam",
-            "observation.images.sync.front.cam",
+            "observation.images.sync_left_arm_cam",
+            "observation.images.sync.left.arm.cam",
             "observation.images.sync_head_cam",
             "observation.images.sync.head.cam"
         ]
@@ -469,7 +469,7 @@ class ONNXTensorRTInference:
         
         return features
     
-    def predict(self, front_image, head_image, joint_state) -> np.ndarray:
+    def predict(self, left_image, head_image, joint_state) -> np.ndarray:
         """
         Run inference on preprocessed inputs.
         
@@ -482,7 +482,7 @@ class ONNXTensorRTInference:
         6. Converts predicted relative actions back to absolute actions.
         
         Args:
-            front_image: Front camera image (H, W, 3) RGB.
+            left_image: Left arm camera image (H, W, 3) RGB.
             head_image: Head camera image (H, W, 3) RGB.
             joint_state: Joint positions (6,).
             
@@ -490,17 +490,17 @@ class ONNXTensorRTInference:
             Action array (6,) representing the next target joint position.
         """
         # Preprocess images (HWC -> CHW, [0,1])
-        front_processed = self.preprocess_image(front_image)
+        left_processed = self.preprocess_image(left_image)
         head_processed = self.preprocess_image(head_image)
         
         # Normalize images
-        front_normalized = self._normalize_image(front_processed)
+        left_normalized = self._normalize_image(left_processed)
         head_normalized = self._normalize_image(head_processed)
         
         # Map normalized images to their config keys
         batch_images = {}
-        if 'front' in self.camera_key_map:
-            batch_images[self.camera_key_map['front']] = front_normalized
+        if 'left' in self.camera_key_map:
+            batch_images[self.camera_key_map['left']] = left_normalized
         if 'head' in self.camera_key_map:
             batch_images[self.camera_key_map['head']] = head_normalized
             
@@ -633,7 +633,7 @@ class ONNXTensorRTInference:
         
         return action
 
-    def predict_from_ros_messages(self, front_compressed_msg, head_compressed_msg, joint_state_msg) -> np.ndarray:
+    def predict_from_ros_messages(self, left_compressed_msg, head_compressed_msg, joint_state_msg) -> np.ndarray:
         """
         Run inference from ROS messages using ONNX+TensorRT.
         
@@ -641,13 +641,13 @@ class ONNXTensorRTInference:
             Action array (6,) for position output
         """
         # Decode images
-        front_image = self.decode_compressed_image_msg(front_compressed_msg, is_top_view=False)
+        left_image = self.decode_compressed_image_msg(left_compressed_msg, is_top_view=False)
         head_image = self.decode_compressed_image_msg(head_compressed_msg, is_top_view=True)
         
         # Extract joint state
         joint_state = self.extract_joint_positions_msg(joint_state_msg)
         
-        return self.predict(front_image, head_image, joint_state)
+        return self.predict(left_image, head_image, joint_state)
 
 
 class PredictionEvaluator:
@@ -674,14 +674,14 @@ class PredictionEvaluator:
         
         # Topic names
         self.topics = {
-            'front_image': '/sync/emily01/front/color/image_raw/compressed',
+            'left_image': '/sync/emily01/left_arm/color/image_raw/compressed',
             'head_image': '/sync/emily01/head/color/image_raw/compressed',
             'joint_state': '/sync/joint_states',
-            'action_command': '/sync/ra_trajectory_controller/joint_trajectory'
+            'action_command': '/sync/la_trajectory_controller/joint_trajectory'
         }
         
-        # Right arm joint names
-        self.right_arm_joints = self.inference.right_arm_joints
+        # Left arm joint names
+        self.left_arm_joints = self.inference.left_arm_joints
     
     def load_rosbag_data(self, rosbag_path: str, max_samples: int = 100) -> Dict[str, List]:
         """Load synchronized data from rosbag."""
@@ -722,7 +722,7 @@ class PredictionEvaluator:
         return messages
     
     def extract_ground_truth_positions(self, joint_msg) -> np.ndarray:
-        """Extract right arm positions from joint state message."""
+        """Extract left arm positions from joint state message."""
         return self.inference.extract_joint_positions_msg(joint_msg)
     
     def extract_ground_truth_from_command(self, command_msg) -> np.ndarray:
@@ -746,14 +746,14 @@ class PredictionEvaluator:
         
         messages = self.load_rosbag_data(rosbag_path, num_samples)
         
-        front_count = len(messages[self.topics['front_image']])
+        left_count = len(messages[self.topics['left_image']])
         head_count = len(messages[self.topics['head_image']])
         joint_count = len(messages[self.topics['joint_state']])
         action_count = len(messages[self.topics['action_command']])
         
-        print(f"Loaded messages - Front: {front_count}, Head: {head_count}, Joints: {joint_count}, Actions: {action_count}")
+        print(f"Loaded messages - Left: {left_count}, Head: {head_count}, Joints: {joint_count}, Actions: {action_count}")
         
-        min_count = min(front_count, head_count, joint_count, action_count)
+        min_count = min(left_count, head_count, joint_count, action_count)
         if min_count == 0:
             raise ValueError("No synchronized messages found")
         
@@ -768,14 +768,14 @@ class PredictionEvaluator:
         
         for i in range(num_samples):
             try:
-                front_msg = messages[self.topics['front_image']][i]
+                left_msg = messages[self.topics['left_image']][i]
                 head_msg = messages[self.topics['head_image']][i]
                 joint_msg = messages[self.topics['joint_state']][i]
                 action_msg = messages[self.topics['action_command']][i]
                 
                 # Time inference
                 start_time = time.perf_counter()
-                pred = self.inference.predict_from_ros_messages(front_msg, head_msg, joint_msg)
+                pred = self.inference.predict_from_ros_messages(left_msg, head_msg, joint_msg)
                 inference_time = time.perf_counter() - start_time
                 inference_times.append(inference_time)
                 
@@ -852,7 +852,7 @@ class PredictionEvaluator:
         print(f"  Std Error: {results['std_error_overall']:.4f} rad ({np.rad2deg(results['std_error_overall']):.2f}°)")
         
         print(f"\nPer-Joint Metrics:")
-        for i, joint_name in enumerate(self.inference.right_arm_joints):
+        for i, joint_name in enumerate(self.inference.left_arm_joints):
             print(f"\n  {joint_name}:")
             print(f"    MAE:  {results['mae_per_joint'][i]:.4f} rad ({np.rad2deg(results['mae_per_joint'][i]):.2f}°)")
             print(f"    RMSE: {results['rmse_per_joint'][i]:.4f} rad ({np.rad2deg(results['rmse_per_joint'][i]):.2f}°)")
@@ -873,7 +873,7 @@ class PredictionEvaluator:
         fig, axes = plt.subplots(3, 2, figsize=(15, 12))
         fig.suptitle('Prediction vs Ground Truth - ONNX+TensorRT Pipeline', fontsize=16)
         
-        for i, (ax, joint_name) in enumerate(zip(axes.flat, self.inference.right_arm_joints)):
+        for i, (ax, joint_name) in enumerate(zip(axes.flat, self.inference.left_arm_joints)):
             # Plot predictions vs ground truth
             ax.plot(ground_truth[:, i], label='Ground Truth', linewidth=2)
             ax.plot(predictions[:, i], label='Prediction', linewidth=2, alpha=0.7)
