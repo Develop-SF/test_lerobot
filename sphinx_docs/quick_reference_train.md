@@ -329,7 +329,7 @@ python lerobot/scripts/compute_relative_action_stats.py \
 # Train
 python lerobot/scripts/train_with_relative_actions.py \
     --config_path /mnt/nas/dataset/robot_learning/lerobot/eric_plating_v2/training_config.json \
-    --output_dir /mnt/nas/dataset/robot_learning/lerobot/eric_plating_v2/runs \
+    --output_dir /mnt/nas/dataset/robot_learning/lerobot/eric_plating_v2/models/relative \
     --use_relative_actions \
     --arm_dim 6 \
     --obs_horizon 2 \
