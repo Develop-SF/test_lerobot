@@ -236,7 +236,7 @@ class ROSBag2ConverterCroppedTrimmed:
         """
         Decode compressed image from ROS CompressedImage message.
         Applies cropping and rotation for top view, resizing for left arm.
-        Both cameras output 224×178 resolution.
+        Both cameras output 224×224 resolution.
         """
         image_data = bytes(msg.data)
         
@@ -262,9 +262,9 @@ class ROSBag2ConverterCroppedTrimmed:
             # Top view (head camera): Rotate 90° clockwise → 237×193 (height=193, width=237)
             image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
         else:
-            # Left arm camera: Resize to 224×178 (height=178, width=224)
-            # cv2.resize takes (width, height), so (224, 178) for width=224, height=178
-            image = cv2.resize(image, (224, 178), interpolation=cv2.INTER_AREA)
+            # Left arm camera: Resize to 224×224 (height=224, width=224)
+            # cv2.resize takes (width, height), so (224, 224) for width=224, height=224
+            image = cv2.resize(image, (224, 224), interpolation=cv2.INTER_AREA)
         
         return image
     

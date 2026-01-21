@@ -3,13 +3,13 @@
 # Convert approach_plate rosbags to LeRobot dataset with cropping and trimming
 
 # Environment setup
-export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6
-eval "$(conda shell.bash hook)"
-conda activate lerobot
+# export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6
+# eval "$(conda shell.bash hook)"
+# conda activate lerobot
 
 # Configuration
-BASE_DIR="/mnt/SF-Shared/rosbags/20251222_eric_plating_v2"
-OUTPUT_DIR="/mnt/SF-Shared/dataset/robot_learning/lerobot/eric_plating_v2_cropped"
+BASE_DIR="/mnt/nas/rosbags/michael_pusht"
+OUTPUT_DIR="/mnt/nas/dataset/robot_learning/lerobot/michael_pusht_cropped_q3_left"
 MAPPING_FILE=""
 
 # suppress verbose SVT logs
@@ -18,7 +18,7 @@ export SVT_AV1_LOG=1
 # Crop box for top view (head camera)
 CROP_X=260
 CROP_Y=135
-CROP_W=178
+CROP_W=224
 CROP_H=224
 
 # Episodes to skip (none)
@@ -45,7 +45,7 @@ echo "  Parallel workers: $NUM_WORKERS (1=sequential/memory-safe, 4-8=faster/mor
 echo ""
 
 # Count episodes
-EPISODE_COUNT=$(find "$BASE_DIR" -maxdepth 1 -type d -name "eric_plating_v2*" | wc -l)
+EPISODE_COUNT=$(find "$BASE_DIR" -maxdepth 1 -type d -name "michael_pusht_q3_left*" | wc -l)
 echo "Found $EPISODE_COUNT rosbag episodes"
 echo ""
 
@@ -85,9 +85,9 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo "Dataset saved to: $OUTPUT_DIR"
         echo ""
         echo "Summary:"
-        echo "  - Top view: cropped to ${CROP_W}x${CROP_H}, rotated 90°, final size 224x178"
-        echo "  - Left arm: resized to 224x178"
-        echo "  - Both cameras at matching resolution: 224x178"
+        echo "  - Top view: cropped to ${CROP_W}x${CROP_H}, rotated 90°, final size 224x224"
+        echo "  - Left arm: resized to 224x224"
+        echo "  - Both cameras at matching resolution: 224x224"
         echo "  - All episodes processed (0-72)"
         echo "  - Episode-specific frame trimming applied"
         echo "  - All topics aligned to same message count"
