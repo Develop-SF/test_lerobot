@@ -219,7 +219,7 @@ class ONNXTensorRTInference:
         """Load the image_features list from the original model config."""
         # Resolve checkpoint path
         if not (self.checkpoint_path / "pretrained_model").exists():
-            checkpoint_path = self.checkpoint_path / "output" / "checkpoints" / "last"
+            checkpoint_path = self.checkpoint_path / "last"
         else:
             checkpoint_path = self.checkpoint_path
 
@@ -252,7 +252,7 @@ class ONNXTensorRTInference:
 
         # Resolve checkpoint path
         if not (self.checkpoint_path / "pretrained_model").exists():
-            checkpoint_path = self.checkpoint_path / "output" / "checkpoints" / "last"
+            checkpoint_path = self.checkpoint_path / "last"
         else:
             checkpoint_path = self.checkpoint_path
 
@@ -705,11 +705,11 @@ class PredictionEvaluator:
         if not ROS_AVAILABLE:
             raise RuntimeError("ROS2 not available")
 
-        storage_options = rosbag2_py.StorageOptions(
-            uri=str(rosbag_path), storage_id="mcap"
-        )
+        storage_id = 'mcap' if str(rosbag_path).endswith('.mcap') else 'sqlite3'
+        storage_options = rosbag2_py.StorageOptions(uri=str(rosbag_path), storage_id=storage_id)
         converter_options = rosbag2_py.ConverterOptions(
-            input_serialization_format="cdr", output_serialization_format="cdr"
+            input_serialization_format='cdr',
+            output_serialization_format='cdr'
         )
 
         reader = rosbag2_py.SequentialReader()

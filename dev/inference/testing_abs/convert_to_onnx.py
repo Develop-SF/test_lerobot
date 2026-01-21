@@ -164,9 +164,9 @@ def export_rgb_encoder(policy, output_dir: Path, opset_version: int = 17):
             crop_h, crop_w = img_shape[1], img_shape[2]
         else:
              # Fallback to hardcoded values if not found (matching lerobot_inference.py target size)
-             # Note: lerobot_inference.py uses (224, 178) which is (W, H)
+             # Note: lerobot_inference.py uses (224, 224) which is (W, H)
              # PyTorch usually expects (H, W)
-             crop_h, crop_w = 178, 224 
+             crop_h, crop_w = 224, 224 
 
     # Get device from model parameters
     device = get_model_device(rgb_encoder)
