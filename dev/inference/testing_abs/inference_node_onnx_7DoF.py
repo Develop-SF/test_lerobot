@@ -771,7 +771,7 @@ class InferenceNode(Node):
         # Setup gripper publisher
         self.gripper_pub = self.create_publisher(
             GripperCommand,
-            '/sns_right_gripper_cmd',
+            '/right_gripper_cmd',
             control_qos
         )
         
