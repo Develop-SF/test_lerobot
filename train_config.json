@@ -3,12 +3,12 @@
         "repo_id": "/mnt/nas/users/Matt/spatula/lerobot_cropped",
         "episodes": null,
         "image_transforms": {
-            "enable": true,
+            "enable": false,
             "max_num_transforms": 1,
             "random_order": false
         },
         "use_imagenet_stats": true,
-        "video_backend": "pyav"
+        "video_backend": "torchcodec"
     },
     "policy": {
         "type": "diffusion",
@@ -93,7 +93,8 @@
         "optimizer_eps": 1e-08,
         "optimizer_weight_decay": 1e-06,
         "scheduler_name": "cosine",
-        "scheduler_warmup_steps": 500
+        "scheduler_warmup_steps": 500,
+        "push_to_hub": false
     },
     "job_name": "spatula_cropped_absolute_diffusion_20hz_horizon-64",
     "resume": false,
