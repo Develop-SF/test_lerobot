@@ -8,16 +8,16 @@
 # conda activate lerobot
 
 # Configuration
-BASE_DIR="/mnt/nas/rosbags/michael_pusht"
-OUTPUT_DIR="/mnt/nas/dataset/robot_learning/lerobot/michael_pusht_cropped_q3_left"
+BASE_DIR="/root/nas/rosbags/michael_pusht_cart"
+OUTPUT_DIR="/root/nas/dataset/robot_learning/lerobot/michael_pusht_near_cart"
 MAPPING_FILE=""
 
 # suppress verbose SVT logs
 export SVT_AV1_LOG=1
 
 # Crop box for top view (head camera)
-CROP_X=260
-CROP_Y=135
+CROP_X=220
+CROP_Y=150
 CROP_W=224
 CROP_H=224
 
@@ -45,7 +45,7 @@ echo "  Parallel workers: $NUM_WORKERS (1=sequential/memory-safe, 4-8=faster/mor
 echo ""
 
 # Count episodes
-EPISODE_COUNT=$(find "$BASE_DIR" -maxdepth 1 -type d -name "michael_pusht_q3_left*" | wc -l)
+EPISODE_COUNT=$(find "$BASE_DIR" -maxdepth 1 -type d -name "michae_pusht_cart_*" | wc -l)
 echo "Found $EPISODE_COUNT rosbag episodes"
 echo ""
 
@@ -60,9 +60,9 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     python rosbag_to_lerobot_cropped_trimmed.py \
         "$BASE_DIR" \
         --output-dir "$OUTPUT_DIR" \
-        --dataset-name "eric_plating_v2_cropped" \
+        --dataset-name "michael_pusht_near_cart" \
         --fps 20 \
-        --task "Eric plating task with dual cameras and left arm control cropped" \
+        --task "Michael pusht start from nearer initial position in cartesian space" \
         --tolerance 1.0 \
         --no-trim-unmoving \
         --no-downsize \
@@ -70,12 +70,13 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
         --output-mode pos_only \
         --crop $CROP_X $CROP_Y $CROP_W $CROP_H \
         --num-workers $NUM_WORKERS \
+        --cartesian \
         --observation-topics \
             "/sync/emily01/left_arm/color/image_raw/compressed" \
             "/sync/emily01/head/color/image_raw/compressed" \
             "/sync/joint_states" \
         --action-topics \
-            "/sync/la_trajectory_controller/joint_trajectory"
+            "/sync/la/servo_node/delta_twist_cmds"
     
     if [ $? -eq 0 ]; then
         echo ""

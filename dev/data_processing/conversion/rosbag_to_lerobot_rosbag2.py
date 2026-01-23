@@ -24,6 +24,9 @@ from rosidl_runtime_py.utilities import get_message
 import rosbag2_py
 from rosbag2_py import StorageOptions, ConverterOptions
 
+from pytransform3d import rotations as pr
+from pyolp_robotics import ur10e_fk
+
 # LeRobot imports
 sys.path.append(str(Path(__file__).parent))
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
@@ -274,23 +277,53 @@ class ROSBag2Converter:
             'position': left_positions.astype(positions.dtype),
             'velocity': left_velocities.astype(velocities.dtype)
         }
-    
-    def extract_tf_state_from_msg(self, msg) -> np.ndarray:
-        """
-        Extract left hand pose from TF message.
-        Target frames: la_base_link -> la_tool_0
-        Returns [x, y, z, qx, qy, qz, qw]
-        """
-        if not hasattr(msg, 'transforms'):
-            raise ValueError("TF message has no transforms")
-            
-        for transform in msg.transforms:
-            if transform.header.frame_id == 'la_base_link' and transform.child_frame_id == 'la_tool_0':
-                t = transform.transform.translation
-                r = transform.transform.rotation
-                return np.array([t.x, t.y, t.z, r.x, r.y, r.z, r.w], dtype=np.float64)
+    def _forwardKinematics(self,theta,tcp=None):  
+        # theta are the joint angles in radians
+        # tcp is the tcp offset as a pose (x,y,z,rx,ry,rz)
+
+        #values for UR-10e (https://www.universal-robots.com/articles/ur/application-installation/dh-parameters-for-calculations-of-kinematics-and-dynamics/):
+        a = np.array([0.0000,-0.6127,-0.57155,0.0000,0.0000,0.0000])
+        d = np.array([0.1807,0.0000,0.0000,0.17415,0.11985,0.11655])
+        alpha = np.array([np.pi/2,0.,0.,np.pi/2,-np.pi/2,0.])
         
-        raise ValueError("Target transform la_base_link -> la_tool_0 not found in TF message")
+        #values from calibration.conf:
+        delta_a = np.array([ 3.1576640107943976e-05, 0.298634925475782076, 0.227031257526500829, -8.27068507303316573e-05, 3.6195435783833642e-05, 0])
+        delta_d = np.array([ 5.82932048768247668e-05, 362.998939868892023, -614.839459588742898, 251.84113332747981, 0.000164511802564715204, -0.000899906496469232708])
+        delta_alpha = np.array([ -0.000774756642435869836, 0.00144883356002286951, -0.00181081418698111852, 0.00068792563586761446, 0.000450856239573305118, 0])
+        delta_theta = np.array([ 1.09391516130152855e-07, 1.03245736607748673, 6.17452995676434124, -0.92380698472218048, 6.42771759845617296e-07, -3.18941184192234051e-08])
+
+        a += delta_a
+        d += delta_d
+        alpha+=delta_alpha
+        theta=theta.copy()+delta_theta
+
+        ot = np.eye(4)
+        for i in range(6):
+            ot = ot @ np.array([[np.cos(theta[i]), -(np.sin(theta[i]))*np.cos(alpha[i]), np.sin(theta[i])*np.sin(alpha[i]), a[i]*np.cos(theta[i])],[np.sin(theta[i]),np.cos(theta[i])*np.cos(alpha[i]),-(np.cos(theta[i]))*np.sin(alpha[i]),a[i]*np.sin(theta[i])], [0.0,np.sin(alpha[i]),np.cos(alpha[i]),d[i]],[0.0,0.0,0.0,1.0]])
+
+        if not tcp is None:
+            offset = np.array([ot[0,3],ot[1,3],ot[2,3]])  + (ot[:3,:3] @ tcp[:3])
+            newAngle = pr.compact_axis_angle_from_matrix( ot[:3,:3] @ pr.matrix_from_compact_axis_angle(tcp[3:]))
+            return np.array([offset[0],offset[1],offset[2],newAngle[0],newAngle[1],newAngle[2]])
+        else:
+            axisAngle = pr.compact_axis_angle_from_matrix(ot[:3,:3])
+            return np.array([ot[0,3],ot[1,3],ot[2,3],axisAngle[0],axisAngle[1],axisAngle[2]])
+
+    def extract_cartesian_state_from_joints(self, msg) -> np.ndarray:
+        """Extract cartesian position (x, y) from JointState message using forward kinematics."""
+        joint_state = self.extract_left_hand_state_from_msg(msg)
+        theta = joint_state['position']
+        
+        # UR-10e FK requires 6 joints
+        if len(theta) != 6:
+            if len(theta) > 6:
+                theta = theta[:6]
+            else:
+                raise ValueError(f"UR-10e FK requires 6 joints, got {len(theta)}")
+        
+        cartesian_pose = self._forwardKinematics(theta)
+        return np.array([-cartesian_pose[0], -cartesian_pose[1]], dtype=np.float64)
+
 
     def extract_controller_command_from_msg(self, msg) -> np.ndarray:
         """
@@ -349,8 +382,7 @@ class ROSBag2Converter:
         angular = msg.twist.angular
         
         command = np.array([
-            linear.x, linear.y, linear.z,
-            angular.x, angular.y, angular.z
+            linear.x, linear.y
         ])
         
         if not np.all(np.isfinite(command)):
@@ -422,37 +454,45 @@ class ROSBag2Converter:
         
         # Add left hand joint state observation based on input mode
         if self.joint_state_topics and self.input_mode != "vision_only":
-            num_left_joints = len(self.left_hand_joint_names)
-            
-            if self.input_mode == "vision_pos":
-                # Position only
-                features["observation.state"] = {
-                    "dtype": "float64",  # Preserve original rosbag precision
-                    "shape": (num_left_joints,),  # position only for each joint
-                    "names": [f"{joint}_pos" for joint in self.left_hand_joint_names]
-                }
-            elif self.input_mode == "vision_pos_vel":
-                # Position and velocity
-                features["observation.state"] = {
-                    "dtype": "float64",  # Preserve original rosbag precision
-                    "shape": (num_left_joints * 2,),  # position + velocity for each joint
-                    "names": ([f"{joint}_pos" for joint in self.left_hand_joint_names] + 
-                             [f"{joint}_vel" for joint in self.left_hand_joint_names])
-                }
-            elif self.input_mode == "vision_tf":
-                # Pose only (7 dimensions: 3 translation + 4 rotation)
+            if self.cartesian:
+                # Cartesian state (x, y)
                 features["observation.state"] = {
                     "dtype": "float64",
-                    "shape": (7,),
-                    "names": ["x", "y", "z", "qx", "qy", "qz", "qw"]
+                    "shape": (2,),
+                    "names": ["x", "y"]
                 }
+            else:
+                num_left_joints = len(self.left_hand_joint_names)
+                
+                if self.input_mode == "vision_pos":
+                    # Position only
+                    features["observation.state"] = {
+                        "dtype": "float64",  # Preserve original rosbag precision
+                        "shape": (num_left_joints,),  # position only for each joint
+                        "names": [f"{joint}_pos" for joint in self.left_hand_joint_names]
+                    }
+                elif self.input_mode == "vision_pos_vel":
+                    # Position and velocity
+                    features["observation.state"] = {
+                        "dtype": "float64",  # Preserve original rosbag precision
+                        "shape": (num_left_joints * 2,),  # position + velocity for each joint
+                        "names": ([f"{joint}_pos" for joint in self.left_hand_joint_names] + 
+                                 [f"{joint}_vel" for joint in self.left_hand_joint_names])
+                    }
+                elif self.input_mode == "vision_tf":
+                    # Pose only (7 dimensions: 3 translation + 4 rotation)
+                    features["observation.state"] = {
+                        "dtype": "float64",
+                        "shape": (7,),
+                        "names": ["x", "y", "z", "qx", "qy", "qz", "qw"]
+                    }
         
         # Add action based on output mode or cartesian flag
         if self.cartesian:
             features["action"] = {
                 "dtype": "float64",
-                "shape": (6,),
-                "names": ["linear_x", "linear_y", "linear_z", "angular_x", "angular_y", "angular_z"]
+                "shape": (2,),
+                "names": ["linear_x", "linear_y"]
             }
         else:
             num_left_joints = len(self.left_hand_joint_names)
@@ -573,19 +613,22 @@ class ROSBag2Converter:
                         frame_dict[feature_key] = image
                             
                     elif topic_name in self.joint_state_topics and self.input_mode != "vision_only":
-                        # Extract left hand joint data based on input mode
-                        left_hand_state = self.extract_left_hand_state_from_msg(msg)
-                        
-                        if self.input_mode == "vision_pos":
-                            # Position only
-                            frame_dict["observation.state"] = left_hand_state['position']
-                        elif self.input_mode == "vision_pos_vel":
-                            # Position and velocity
-                            combined_state = np.concatenate([
-                                left_hand_state['position'], 
-                                left_hand_state['velocity']
-                            ])
-                            frame_dict["observation.state"] = combined_state
+                        if self.cartesian:
+                            frame_dict["observation.state"] = self.extract_cartesian_state_from_joints(msg)
+                        else:
+                            # Extract left hand joint data based on input mode
+                            left_hand_state = self.extract_left_hand_state_from_msg(msg)
+                            
+                            if self.input_mode == "vision_pos":
+                                # Position only
+                                frame_dict["observation.state"] = left_hand_state['position']
+                            elif self.input_mode == "vision_pos_vel":
+                                # Position and velocity
+                                combined_state = np.concatenate([
+                                    left_hand_state['position'], 
+                                    left_hand_state['velocity']
+                                ])
+                                frame_dict["observation.state"] = combined_state
                             
                     elif topic_name in self.tf_topics and self.input_mode == "vision_tf":
                         # Extract left hand pose from TF message
@@ -823,16 +866,19 @@ class ROSBag2Converter:
                         frame_dict[feature_key] = image
                     
                     elif topic_name in self.joint_state_topics and self.input_mode != "vision_only":
-                        left_hand_state = self.extract_left_hand_state_from_msg(msg)
-                        
-                        if self.input_mode == "vision_pos":
-                            frame_dict["observation.state"] = left_hand_state['position']
-                        elif self.input_mode == "vision_pos_vel":
-                            combined_state = np.concatenate([
-                                left_hand_state['position'],
-                                left_hand_state['velocity']
-                            ])
-                            frame_dict["observation.state"] = combined_state
+                        if self.cartesian:
+                            frame_dict["observation.state"] = self.extract_cartesian_state_from_joints(msg)
+                        else:
+                            left_hand_state = self.extract_left_hand_state_from_msg(msg)
+                            
+                            if self.input_mode == "vision_pos":
+                                frame_dict["observation.state"] = left_hand_state['position']
+                            elif self.input_mode == "vision_pos_vel":
+                                combined_state = np.concatenate([
+                                    left_hand_state['position'],
+                                    left_hand_state['velocity']
+                                ])
+                                frame_dict["observation.state"] = combined_state
 
                     elif topic_name in self.tf_topics and self.input_mode == "vision_tf":
                         tf_state = self.extract_tf_state_from_msg(msg)
