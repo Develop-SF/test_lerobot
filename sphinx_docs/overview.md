@@ -2,7 +2,7 @@
 
 > Prefer the Quick Reference for hands-on steps: see {doc}`quick_reference`. This page summarizes components and links without repeating commands.
 
-Welcome to the comprehensive documentation for the LeRobot Testing Branch!
+Welcome to the comprehensive documentation for the LeRobot Testing Branch! :)
 
 ---
 
@@ -169,9 +169,9 @@ python lerobot/scripts/train_with_relative_actions.py \
 **Location:** `dev/inference/testing_abs/`
 
 **Documentation:**
-- [README.md](dev/inference/testing_abs/README.md) - Overview
-- [DEPLOYMENT_GUIDE.md](dev/inference/testing_abs/DEPLOYMENT_GUIDE.md) - Deployment steps
-- [TESTING_GUIDE.md](dev/inference/testing_abs/TESTING_GUIDE.md) - Testing procedures
+- `dev/inference/testing_abs/README.md` - Overview
+- `dev/inference/testing_abs/DEPLOYMENT_GUIDE.md` - Deployment steps
+- `dev/inference/testing_abs/TESTING_GUIDE.md` - Testing procedures
 
 **Key Files:**
 - `convert_to_onnx.py` / `convert_to_onnx_7DoF.py` - ONNX conversion
@@ -210,7 +210,7 @@ python3 inference_node_onnx_7DoF.py \
 **Location:** `dev/inference/testing_rel/`
 
 **Documentation:**
-- [README.md](dev/inference/testing_rel/README.md) - Overview
+- `dev/inference/testing_rel/README.md` - Overview
 
 **Key Files:**
 - `convert_to_onnx_rel.py` - ONNX conversion with relative actions
@@ -298,30 +298,30 @@ python inference_node_onnx_rel.py --checkpoint /data/model/checkpoints/best --on
 
 | Task | Document | Section |
 |------|----------|---------|
-| Understanding changes | [BRANCH_CHANGES_SUMMARY.md](BRANCH_CHANGES_SUMMARY.md) | Feature Comparison |
-| Converting ROS bags | [TESTING_BRANCH_GUIDE.md](TESTING_BRANCH_GUIDE.md) | Section 1 |
-| Training models | [TESTING_BRANCH_GUIDE.md](TESTING_BRANCH_GUIDE.md) | Section 2 |
-| Converting to ONNX | [TESTING_BRANCH_GUIDE.md](TESTING_BRANCH_GUIDE.md) | Section 3 |
-| Running inference | [TESTING_BRANCH_GUIDE.md](TESTING_BRANCH_GUIDE.md) | Section 4 |
-| Quick commands | [QUICK_REFERENCE.md](QUICK_REFERENCE.md) | All sections |
-| Visual diagrams | [WORKFLOW_DIAGRAM.md](WORKFLOW_DIAGRAM.md) | All sections |
-| Deployment | [dev/inference/testing_abs/DEPLOYMENT_GUIDE.md](dev/inference/testing_abs/DEPLOYMENT_GUIDE.md) | All sections |
-| Troubleshooting | [TESTING_BRANCH_GUIDE.md](TESTING_BRANCH_GUIDE.md) | Section 5 |
+| Understanding changes | {doc}`branch_changes` | Feature Comparison |
+| Converting ROS bags | {doc}`testing_branch` | Section 1 |
+| Training models | {doc}`testing_branch` | Section 2 |
+| Converting to ONNX | {doc}`testing_branch` | Section 3 |
+| Running inference | {doc}`testing_branch` | Section 4 |
+| Quick commands | {doc}`quick_reference` | All sections |
+| Visual diagrams | {doc}`workflow_diagram` | All sections |
+| Deployment | `dev/inference/testing_abs/DEPLOYMENT_GUIDE.md` | All sections |
+| Troubleshooting | {doc}`testing_branch` | Section 5 |
 
 ### By Question
 
 | Question | Answer Location |
 |----------|----------------|
-| What's new in this branch? | [BRANCH_CHANGES_SUMMARY.md](BRANCH_CHANGES_SUMMARY.md) |
-| How do I convert ROS bags? | [TESTING_BRANCH_GUIDE.md](TESTING_BRANCH_GUIDE.md) § 1 |
-| What are input/output modes? | [QUICK_REFERENCE.md](QUICK_REFERENCE.md) § Input/Output Modes |
-| How do I train with relative actions? | [TESTING_BRANCH_GUIDE.md](TESTING_BRANCH_GUIDE.md) § 2B |
-| How do I convert to ONNX? | [TESTING_BRANCH_GUIDE.md](TESTING_BRANCH_GUIDE.md) § 3 |
-| How do I deploy on a robot? | [dev/inference/testing_abs/DEPLOYMENT_GUIDE.md](dev/inference/testing_abs/DEPLOYMENT_GUIDE.md) |
-| What ROS topics are used? | [QUICK_REFERENCE.md](QUICK_REFERENCE.md) § ROS2 Topics |
-| How do I troubleshoot issues? | [TESTING_BRANCH_GUIDE.md](TESTING_BRANCH_GUIDE.md) § 5 |
-| How do I optimize performance? | [TESTING_BRANCH_GUIDE.md](TESTING_BRANCH_GUIDE.md) § 6 |
-| What's the architecture? | [WORKFLOW_DIAGRAM.md](WORKFLOW_DIAGRAM.md) § System Architecture |
+| What's new in this branch? | {doc}`branch_changes` |
+| How do I convert ROS bags? | {doc}`testing_branch` § 1 |
+| What are input/output modes? | {doc}`quick_reference` § Input/Output Modes |
+| How do I train with relative actions? | {doc}`testing_branch` § 2B |
+| How do I convert to ONNX? | {doc}`testing_branch` § 3 |
+| How do I deploy on a robot? | `dev/inference/testing_abs/DEPLOYMENT_GUIDE.md` |
+| What ROS topics are used? | {doc}`quick_reference` § ROS2 Topics |
+| How do I troubleshoot issues? | {doc}`testing_branch` § 5 |
+| How do I optimize performance? | {doc}`testing_branch` § 6 |
+| What's the architecture? | {doc}`workflow_diagram` § System Architecture |
 
 ---
 
@@ -389,17 +389,17 @@ python inference_node_onnx_rel.py --checkpoint /data/model/checkpoints/best --on
 ## 🎓 Learning Path
 
 ### Beginner
-1. Read [BRANCH_CHANGES_SUMMARY.md](BRANCH_CHANGES_SUMMARY.md)
-2. View [WORKFLOW_DIAGRAM.md](WORKFLOW_DIAGRAM.md)
-3. Follow [QUICK_REFERENCE.md](QUICK_REFERENCE.md) examples
+1. Read {doc}`branch_changes`
+2. View {doc}`workflow_diagram`
+3. Follow {doc}`quick_reference` examples
 
 ### Intermediate
-1. Study [TESTING_BRANCH_GUIDE.md](TESTING_BRANCH_GUIDE.md)
+1. Study {doc}`testing_branch`
 2. Read component-specific documentation
 3. Try both absolute and relative action workflows
 
 ### Advanced
-1. Read [DEPLOYMENT_GUIDE.md](dev/inference/testing_abs/DEPLOYMENT_GUIDE.md)
+1. Read `dev/inference/testing_abs/DEPLOYMENT_GUIDE.md`
 2. Optimize performance with TensorRT
 3. Customize preprocessing pipeline
 
@@ -450,10 +450,10 @@ python inference_node_onnx_rel.py --checkpoint /data/model/checkpoints/best --on
 
 **Choose your path:**
 
-**Path 1: Quick Start** → [QUICK_REFERENCE.md](QUICK_REFERENCE.md)  
-**Path 2: Complete Guide** → [TESTING_BRANCH_GUIDE.md](TESTING_BRANCH_GUIDE.md)  
-**Path 3: Visual Learning** → [WORKFLOW_DIAGRAM.md](WORKFLOW_DIAGRAM.md)  
-**Path 4: Understanding Changes** → [BRANCH_CHANGES_SUMMARY.md](BRANCH_CHANGES_SUMMARY.md)
+**Path 1: Quick Start** → {doc}`quick_reference`  
+**Path 2: Complete Guide** → {doc}`testing_branch`  
+**Path 3: Visual Learning** → {doc}`workflow_diagram`  
+**Path 4: Understanding Changes** → {doc}`branch_changes`
 
 ---
 

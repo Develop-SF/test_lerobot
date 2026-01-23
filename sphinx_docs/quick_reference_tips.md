@@ -14,7 +14,7 @@ Use this page for runtime tips and quick fixes for common issues.
   - *Fix*: Code modified to use `torch.tensor()` which accepts lists, or robustly check types before stacking.
 - **`libtorchcodec` Loading Errors**:
   - *Issue*: `RuntimeError` due to missing `libavutil.so` or symbol mismatch.
-  - *Fix*: See "FFmpeg & TorchCodec" setup in [Setup](quick_reference_setup.md).
+  - **Fix**: See "FFmpeg & TorchCodec" setup in {doc}`quick_reference_setup`.
 - **OpenSSL Version Mismatch**:
   - *Issue*: `ImportError: /lib/x86_64-linux-gnu/libcrypto.so.3: version 'OPENSSL_3.3.0' not found` (occurs when importing `datasets` or `pyarrow`)
   - *Fix*: Reinstall `pyarrow` and `datasets` from conda-forge (not pip): `conda install -c conda-forge pyarrow datasets`. This ensures all dependencies use compatible system libraries natively.

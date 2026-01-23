@@ -149,6 +149,48 @@ wandb login
 
 (note: you will also need to enable WandB in the configuration. See below.)
 
+## Collaborative Documentation
+
+🤗 LeRobot provides a web-based documentation editor that allows your team to collaborate on docs in real-time. Changes to markdown files are instantly reflected in the Sphinx documentation.
+
+### Build and Launch Documentation Server
+
+**Step 1: Build the Sphinx documentation**
+
+Option A - Using the interactive build script (recommended):
+```bash
+./build_sphinx_docs.sh
+# Select option "1" to build, or "4" to clean and rebuild
+```
+
+Option B - Using sphinx-build directly:
+```bash
+cd sphinx_docs
+sphinx-build -b html . _build/html
+```
+
+**Step 2: Start the documentation preview server** (displays built docs)
+```bash
+cd sphinx_docs/_build/html
+python3 -m http.server 8000 --bind 0.0.0.0
+```
+Documentation will be available at: `http://<YOUR_IP>:8000`
+
+**Step 3: Start the web editor** (in a separate terminal)
+```bash
+python3 sphinx_docs/editor/app.py
+```
+Web editor will be available at: `http://<YOUR_IP>:5000`
+
+### How to Use
+
+1. Open the **editor** at `http://<YOUR_IP>:5000` to see all markdown files
+2. Click **"Edit"** on any file to open the web-based markdown editor
+3. Make your changes and click **"Save & Rebuild"**
+4. Changes are automatically saved to the `.md` files and Sphinx rebuilds the documentation
+5. View the updated docs in the **preview** at `http://<YOUR_IP>:8000`
+6. Each page in the preview has a **pencil icon** (next to the theme toggle) that directly links to edit that page
+
 ## Walkthrough
 
 ```

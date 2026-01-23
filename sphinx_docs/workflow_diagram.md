@@ -353,5 +353,5 @@ Limited testing      ───────>  Comprehensive testing
 ---
 
 For detailed commands and configuration, see:
-- [TESTING_BRANCH_GUIDE.md](TESTING_BRANCH_GUIDE.md)
-- [QUICK_REFERENCE.md](QUICK_REFERENCE.md)
+- {doc}`testing_branch`
+- {doc}`quick_reference`

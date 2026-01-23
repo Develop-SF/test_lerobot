@@ -528,11 +528,11 @@ python inference_node_onnx_rel.py \
 ## 9. Additional Resources
 
 ### Documentation Files
-- [dev/inference/README.md](dev/inference/README.md) - Inference overview
-- [dev/inference/testing_abs/README.md](dev/inference/testing_abs/README.md) - Absolute actions
-- [dev/inference/testing_abs/DEPLOYMENT_GUIDE.md](dev/inference/testing_abs/DEPLOYMENT_GUIDE.md) - Deployment guide
-- [dev/inference/testing_abs/TESTING_GUIDE.md](dev/inference/testing_abs/TESTING_GUIDE.md) - Testing guide
-- [dev/inference/testing_rel/README.md](dev/inference/testing_rel/README.md) - Relative actions
+- `dev/inference/README.md` - Inference overview
+- `dev/inference/testing_abs/README.md` - Absolute actions
+- `dev/inference/testing_abs/DEPLOYMENT_GUIDE.md` - Deployment guide
+- `dev/inference/testing_abs/TESTING_GUIDE.md` - Testing guide
+- `dev/inference/testing_rel/README.md` - Relative actions
 
 ### Utility Scripts
 - `inspect_dataset.py` - Inspect LeRobot datasets

@@ -1,6 +1,6 @@
 # LeRobot Testing Branch Documentation
 
-Welcome to the comprehensive documentation for the LeRobot Testing Branch!
+Welcome to the comprehensive documentation for the LeRobot Testing Branch! :)
 
 ```{toctree}
 :maxdepth: 2
@@ -13,12 +13,23 @@ workflow_diagram
 branch_changes
 ```
 
+```{toctree}
+:maxdepth: 2
+:caption: Diffusion Policy Study Guide
+
+study_guide_index
+```
+
 ## Quick Links
 
+### Workflow & Commands
 - {doc}`quick_reference` - Step-by-step setup + commands
 - {doc}`testing_branch` - Complete workflow guide
 - {doc}`workflow_diagram` - Visual diagrams
 - {doc}`branch_changes` (Changelog, optional)
+
+### Learning Resources
+- {doc}`study_guide_index` - **Diffusion Policy Study Guide** (theory, code, experiments)
 
 ## Overview
 

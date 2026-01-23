@@ -10,15 +10,10 @@ Use this page to get the environment ready fast.
   conda install ffmpeg -c conda-forge
   pip install -e .
   ```
-  See the [project README](../../README.md) for more details.
-- Install FFmpeg and TorchCodec:
-  ```bash
-  conda install -y -c conda-forge 'ffmpeg>=7.0'
-  pip install torchcodec==0.2.1
-  ```
-  (Avoid `apt-get` FFmpeg inside Conda; prefer `conda-forge`.)
+  See the main project README for more details.
 
-## Additional Packages
+
+<!-- ## Additional Packages
 ```bash
 pip install numpy==1.26.4 matplotlib
 pip uninstall -y pynvml
@@ -26,7 +21,7 @@ pip install nvidia-ml-py
 pip install poetry-core
 pip uninstall pyarrow -y
 pip install pyarrow
-```
+``` -->
 
 ## ONNX Runtime
 
