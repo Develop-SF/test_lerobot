@@ -30,7 +30,7 @@ from rosbag2_py import StorageOptions, ConverterOptions
 class CroppedTrimmedVideoVisualizer:
     """Create videos with cropping and frame trimming from ROS bag files."""
     
-    def __init__(self, output_dir: str, fps: int = 30, crop_box: Tuple[int, int, int, int] = None):
+    def __init__(self, output_dir: str, fps: int = 30, crop_box: Tuple[int, int, int, int] = None, first_frame_only: bool = False):
         """
         Initialize the video visualizer.
         
@@ -38,10 +38,12 @@ class CroppedTrimmedVideoVisualizer:
             output_dir: Directory to save output videos
             fps: Video frame rate
             crop_box: Tuple of (x, y, w, h) for cropping. If None, no cropping is applied.
+            first_frame_only: If True, only saves the first frame as an image instead of a video.
         """
         self.output_dir = Path(output_dir)
         self.fps = fps
         self.crop_box = crop_box  # (x, y, w, h)
+        self.first_frame_only = first_frame_only
         self.output_dir.mkdir(exist_ok=True)
         
         # Message type cache
@@ -124,7 +126,7 @@ class CroppedTrimmedVideoVisualizer:
         """Extract all frames from a ROS bag file."""
         print(f"📂 Extracting frames from: {bag_path}")
         
-        storage_options = StorageOptions(uri=bag_path, storage_id='sqlite3')
+        storage_options = StorageOptions(uri=bag_path, storage_id='mcap')
         converter_options = ConverterOptions(
             input_serialization_format='cdr',
             output_serialization_format='cdr'
@@ -258,6 +260,13 @@ class CroppedTrimmedVideoVisualizer:
             print(f"❌ No frames remaining after trimming for {episode_name}")
             return None
         
+        if self.first_frame_only:
+            # Save only the first frame as an image
+            output_path = self.output_dir / f"episode_{episode_index:03d}_{episode_name}_first_frame.jpg"
+            cv2.imwrite(str(output_path), trimmed_frames[0])
+            print(f"📸 First frame saved: {output_path}")
+            return output_path
+            
         # Create output video
         output_path = self.output_dir / f"episode_{episode_index:03d}_{episode_name}_cropped_trimmed.mp4"
         return self.create_video_from_frames(trimmed_frames, output_path, episode_name)
@@ -371,6 +380,7 @@ Examples:
     parser.add_argument("--crop", nargs=4, type=int, metavar=('X', 'Y', 'W', 'H'),
                         help="Crop bounding box: x y width height (e.g., 247 122 193 237)")
     parser.add_argument("--max-episodes", type=int, help="Maximum number of episodes to process")
+    parser.add_argument("--first-frame-only", action="store_true", help="Save only the first frame as an image instead of a video")
     
     args = parser.parse_args()
     
@@ -384,7 +394,7 @@ Examples:
     rclpy.init()
     
     try:
-        visualizer = CroppedTrimmedVideoVisualizer(args.output_dir, args.fps, crop_box)
+        visualizer = CroppedTrimmedVideoVisualizer(args.output_dir, args.fps, crop_box, args.first_frame_only)
         visualizer.process_from_episode_mapping(args.mapping, args.max_episodes)
             
     finally:
