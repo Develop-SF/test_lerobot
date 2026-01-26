@@ -4,12 +4,12 @@
 
 # Environment setup
 export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6
-eval "$(conda shell.bash hook)"
-conda activate lerobot
+# eval "$(conda shell.bash hook)"
+# conda activate lerobot
 
 # Configuration
-BASE_DIR="/mnt/SF-Shared/rosbags/20251222_eric_plating_v2"
-OUTPUT_DIR="/mnt/SF-Shared/dataset/robot_learning/lerobot/eric_plating_v2_cropped"
+BASE_DIR="${HOME}/nas/rosbags/202601_eric_scoop"
+OUTPUT_DIR="${HOME}/nas/dataset/robot_learning/lerobot/202601_eric_scoop__white"
 MAPPING_FILE=""
 
 # suppress verbose SVT logs
@@ -28,7 +28,7 @@ SKIP_EPISODES=""
 # Default: 1 (sequential, memory-safe)
 # For faster processing with sufficient RAM: 4-8 workers
 # Each worker loads a full episode into memory
-NUM_WORKERS=1
+NUM_WORKERS=4
 
 echo "========================================="
 echo "ROS Bag to LeRobot Converter"
@@ -57,12 +57,12 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     echo "Starting conversion..."
     echo ""
     
-    python rosbag_to_lerobot_cropped_trimmed.py \
+    python ~/lerobot_ws/src/test_lerobot/dev/data_processing/conversion/rosbag_to_lerobot_cropped_trimmed.py \
         "$BASE_DIR" \
         --output-dir "$OUTPUT_DIR" \
-        --dataset-name "eric_plating_v2_cropped" \
+        --dataset-name "_" \
         --fps 20 \
-        --task "Eric plating task with dual cameras and left arm control cropped" \
+        --task "_" \
         --tolerance 1.0 \
         --no-trim-unmoving \
         --no-downsize \
