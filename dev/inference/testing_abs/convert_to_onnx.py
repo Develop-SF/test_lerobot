@@ -9,7 +9,7 @@ Usage:
     python convert_to_onnx.py \
         --checkpoint /path/to/checkpoint \
         --output-dir ./onnx_models \
-        --opset-version 17
+        --opset-version 18
 """
 
 import argparse
@@ -206,7 +206,7 @@ def export_rgb_encoder(policy, output_dir: Path, opset_version: int = 17):
     return str(output_path)
 
 
-def export_unet(policy, output_dir: Path, opset_version: int = 17):
+def export_unet(policy, output_dir: Path, opset_version: int = 17, override_state_dim: int = None, override_action_dim: int = None):
     """
     Export UNet denoising model to ONNX.
     
@@ -252,7 +252,9 @@ def export_unet(policy, output_dir: Path, opset_version: int = 17):
     horizon = getattr(config, "horizon", 16)
     
     # Access output features - handle both dict and object
-    if hasattr(config, "output_features"):
+    if override_action_dim is not None:
+        action_dim = override_action_dim
+    elif hasattr(config, "output_features"):
         output_features = config.output_features
         action_dim = 6  # Default value
 
@@ -269,32 +271,37 @@ def export_unet(policy, output_dir: Path, opset_version: int = 17):
     else:
         action_dim = 6  # default
     
-    # Calculate global conditioning dimension
-    # State features
+    # Calculate number of cameras
     if hasattr(config, "input_features"):
-        input_features = config.input_features
-        if hasattr(input_features, "__dict__"):
-            # Count image features
-            n_cameras = sum(1 for key in vars(input_features) if "images" in key)
-            # Get state dim
-            if hasattr(input_features, "observation") and hasattr(input_features.observation, "state"):
-                state_dim = input_features.observation.state.shape[0]
-            elif "observation.state" in vars(input_features):
-                state_feature = getattr(input_features, "observation.state")
+        inp = config.input_features
+        if hasattr(inp, "__dict__"):
+            n_cameras = sum(1 for k in vars(inp) if "images" in k)
+        else:
+            n_cameras = sum(1 for k in inp if "images" in k)
+    else:
+        n_cameras = 2
+
+    # Calculate state dimension
+    if override_state_dim is not None:
+        state_dim = override_state_dim
+    elif hasattr(config, "input_features"):
+        inp = config.input_features
+        if hasattr(inp, "__dict__"):
+            if hasattr(inp, "observation") and hasattr(inp.observation, "state"):
+                state_dim = inp.observation.state.shape[0]
+            elif "observation.state" in vars(inp):
+                state_feature = getattr(inp, "observation.state")
                 state_dim = state_feature.shape[0] if hasattr(state_feature, "shape") else 6
             else:
                 state_dim = 6
         else:
-            # Dict-based access
-            n_cameras = sum(1 for key in input_features if "images" in key)
-            if "observation.state" in input_features:
-                state_feature = input_features["observation.state"]
-                state_dim = state_feature.get("shape", [6])[0] if isinstance(state_feature, dict) else 6
+            if "observation.state" in inp:
+                feat = inp["observation.state"]
+                state_dim = feat.get("shape", [6])[0] if isinstance(feat, dict) else 6
             else:
                 state_dim = 6
     else:
-        n_cameras = 2  # default
-        state_dim = 6  # default
+        state_dim = 6
     
     n_obs_steps = getattr(config, "n_obs_steps", 2)
     
@@ -353,7 +360,7 @@ def export_unet(policy, output_dir: Path, opset_version: int = 17):
     return str(output_path)
 
 
-def save_config(policy, output_dir: Path):
+def save_config(policy, output_dir: Path, override_state_dim: int = None, override_action_dim: int = None):
     """
     Save ONNX inference configuration to JSON.
     
@@ -380,28 +387,36 @@ def save_config(policy, output_dir: Path):
     
     # Extract relevant config - use getattr for objects
     # Count cameras
+    if override_state_dim is not None:
+        state_dim = override_state_dim
+    
     if hasattr(config, "input_features"):
         input_features = config.input_features
         if hasattr(input_features, "__dict__"):
             n_cameras = sum(1 for key in vars(input_features) if "images" in key)
             # Get state dim
-            if hasattr(input_features, "observation") and hasattr(input_features.observation, "state"):
-                state_dim = input_features.observation.state.shape[0]
-            else:
-                state_dim = 6
+            if override_state_dim is None:
+                if hasattr(input_features, "observation") and hasattr(input_features.observation, "state"):
+                    state_dim = input_features.observation.state.shape[0]
+                else:
+                    state_dim = 6
         else:
             n_cameras = sum(1 for key in input_features if "images" in key)
-            if "observation.state" in input_features:
-                state_feature = input_features["observation.state"]
-                state_dim = state_feature.get("shape", [6])[0] if isinstance(state_feature, dict) else 6
-            else:
-                state_dim = 6
+            if override_state_dim is None:
+                if "observation.state" in input_features:
+                    state_feature = input_features["observation.state"]
+                    state_dim = state_feature.get("shape", [6])[0] if isinstance(state_feature, dict) else 6
+                else:
+                    state_dim = 6
     else:
         n_cameras = 2
-        state_dim = 6
+        if override_state_dim is None:
+            state_dim = 6
     
     # Get action dim
-    if hasattr(config, "output_features"):
+    if override_action_dim is not None:
+        action_dim = override_action_dim
+    elif hasattr(config, "output_features"):
         output_features = config.output_features
         action_dim = 6  # Default value
 
@@ -491,6 +506,19 @@ def main():
         help="Device for model loading"
     )
     
+    parser.add_argument(
+        "--state-dim",
+        type=int,
+        default=None,
+        help="Override state dimension"
+    )
+    parser.add_argument(
+        "--action-dim",
+        type=int,
+        default=None,
+        help="Override action dimension"
+    )
+    
     args = parser.parse_args()
     
     print("="*80)
@@ -536,8 +564,8 @@ def main():
     # Export models
     with torch.no_grad():
         rgb_encoder_path = export_rgb_encoder(policy, output_dir, args.opset_version)
-        unet_path = export_unet(policy, output_dir, args.opset_version)
-        config_path = save_config(policy, output_dir)
+        unet_path = export_unet(policy, output_dir, args.opset_version, args.state_dim, args.action_dim)
+        config_path = save_config(policy, output_dir, args.state_dim, args.action_dim)
     
     # Verify ONNX models
     print("\n" + "="*80)

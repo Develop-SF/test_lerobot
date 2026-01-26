@@ -15,7 +15,7 @@ try:
     ROS_AVAILABLE = True
 except ImportError:
     ROS_AVAILABLE = False
-    print("ROS2 not available. Cannot evaluate with rosbag data.")
+    print("ROS2 not available. Cannot evaluate with rosbag data.", flush=True)
 
 
 import sys
@@ -56,13 +56,13 @@ class ONNXTensorRTInference:
 
         self._load_image_features_config()
 
-        print(f"Loaded ONNX config:")
-        print(f"  Horizon: {self.config['horizon']}")
-        print(f"  N obs steps: {self.config['n_obs_steps']}")
-        print(f"  N action steps: {self.config['n_action_steps']}")
-        print(f"  Action dim: {self.config['action_dim']}")
-        print(f"  State dim: {self.config['state_dim']}")
-        print(f"  Inference steps: {self.config['num_inference_steps']}")
+        print(f"Loaded ONNX config:", flush=True)
+        print(f"  Horizon: {self.config['horizon']}", flush=True)
+        print(f"  N obs steps: {self.config['n_obs_steps']}", flush=True)
+        print(f"  N action steps: {self.config['n_action_steps']}", flush=True)
+        print(f"  Action dim: {self.config['action_dim']}", flush=True)
+        print(f"  State dim: {self.config['state_dim']}", flush=True)
+        print(f"  Inference steps: {self.config['num_inference_steps']}", flush=True)
 
         self._setup_onnx_sessions()
         self._setup_scheduler()
@@ -97,6 +97,7 @@ class ONNXTensorRTInference:
         self._queues["observation.images"].clear()
 
     def _setup_onnx_sessions(self):
+        print("Initializing ONNX Runtime sessions...", flush=True)
         available_providers = ort.get_available_providers()
         providers = []
         if "TensorrtExecutionProvider" in available_providers and self.device == "cuda":
@@ -119,6 +120,7 @@ class ONNXTensorRTInference:
         self.rgb_encoder_session = ort.InferenceSession(str(encoder_path), sess_options=sess_options, providers=providers)
         unet_path = self.onnx_dir / "unet.onnx"
         self.unet_session = ort.InferenceSession(str(unet_path), sess_options=sess_options, providers=providers)
+        print("Sessions ready.", flush=True)
 
     def _setup_scheduler(self):
         scheduler_kwargs = {
@@ -229,13 +231,20 @@ class ONNXTensorRTInference:
         return np.transpose(image_normalized, (2, 0, 1))
 
     def _normalize_state(self, state: np.ndarray) -> np.ndarray:
+        """Normalize state observation with dimension mismatch handling."""
         if "observation.state" in self.norm_stats:
             stats = self.norm_stats["observation.state"]
+            dim = state.shape[-1]
+            
             if stats.get("mode") == "min_max":
-                state = (state - stats["min"]) / (stats["max"] - stats["min"] + 1e-8)
+                min_val = stats["min"][:dim] if stats["min"].shape[-1] > dim else stats["min"]
+                max_val = stats["max"][:dim] if stats["max"].shape[-1] > dim else stats["max"]
+                state = (state - min_val) / (max_val - min_val + 1e-8)
                 state = state * 2 - 1
             elif stats.get("mode") == "mean_std":
-                state = (state - stats["mean"]) / (stats["std"] + 1e-8)
+                mean = stats["mean"][:dim] if stats["mean"].shape[-1] > dim else stats["mean"]
+                std = stats["std"][:dim] if stats["std"].shape[-1] > dim else stats["std"]
+                state = (state - mean) / (std + 1e-8)
         return state
 
     def _normalize_image(self, image: np.ndarray) -> np.ndarray:
@@ -264,14 +273,17 @@ class ONNXTensorRTInference:
         features_flat = self.rgb_encoder_session.run(["features"], {"image": images_flat})[0]
         return features_flat.reshape(batch_size, -1)
 
-    def predict(self, left_image, head_image, cartesian_state) -> np.ndarray:
+    def predict(self, left_image, head_image, state) -> np.ndarray:
+        """Run inference on preprocessed inputs."""
         left_normalized = self._normalize_image(self.preprocess_image(left_image))
         head_normalized = self._normalize_image(self.preprocess_image(head_image))
         batch_images = {}
         if "left" in self.camera_key_map: batch_images[self.camera_key_map["left"]] = left_normalized
         if "head" in self.camera_key_map: batch_images[self.camera_key_map["head"]] = head_normalized
         images_stacked = np.stack([batch_images[key] for key in self.image_features], axis=0)
-        state_normalized = self._normalize_state(cartesian_state)
+        
+        # Handle normalization with potential dimension mismatch
+        state_normalized = self._normalize_state(state)
         self._queues["observation.state"].append(state_normalized)
         self._queues["observation.images"].append(images_stacked)
 
@@ -286,11 +298,19 @@ class ONNXTensorRTInference:
             state_batch = np.stack(state_list, axis=0)[np.newaxis, ...]
             images_batch = np.stack(images_list, axis=0)[np.newaxis, ...]
 
-            features_reshaped = self._encode_images(images_batch.reshape(1 * self.config["n_obs_steps"], *images_batch.shape[2:]))
+            # Ensure state_batch matches model input dimension
+            model_state_dim = self.config["state_dim"]
+            if state_batch.shape[-1] < model_state_dim:
+                padding = np.zeros((state_batch.shape[0], state_batch.shape[1], model_state_dim - state_batch.shape[-1]), dtype=np.float32)
+                state_batch = np.concatenate([state_batch, padding], axis=-1)
+            elif state_batch.shape[-1] > model_state_dim:
+                state_batch = state_batch[..., :model_state_dim]
+
+            features_reshaped = self._encode_images(images_batch.reshape(-1, *images_batch.shape[2:]))
             img_features = features_reshaped.reshape(1, self.config["n_obs_steps"], -1)
             global_cond = np.concatenate([state_batch, img_features], axis=2).reshape(1, -1).astype(np.float32)
 
-            sample = np.random.randn(1, self.config["horizon"], self.config["action_dim"]).astype(np.float32)
+            sample = noise = np.random.randn(1, self.config["horizon"], self.config["action_dim"]).astype(np.float32)
             self.noise_scheduler.set_timesteps(self.config.get("num_inference_steps", 16))
             for t in self.noise_scheduler.timesteps:
                 model_output = self.unet_session.run(["noise_pred"], {"sample": sample, "timestep": np.array([t.item()], dtype=np.int64), "global_cond": global_cond})[0]
@@ -305,8 +325,8 @@ class ONNXTensorRTInference:
     def predict_from_ros_messages(self, left_compressed_msg, head_compressed_msg, joint_state_msg) -> np.ndarray:
         left = self.decode_compressed_image_msg(left_compressed_msg, is_top_view=False)
         head = self.decode_compressed_image_msg(head_compressed_msg, is_top_view=True)
-        cart = self.extract_cartesian_state_from_joints(joint_state_msg)
-        return self.predict(left, head, cart)
+        cart_state = self.extract_cartesian_state_from_joints(joint_state_msg)
+        return self.predict(left, head, cart_state)
 
 
 class PredictionEvaluator:
@@ -318,7 +338,7 @@ class PredictionEvaluator:
             "left_image": "/sync/emily01/left_arm/color/image_raw/compressed",
             "head_image": "/sync/emily01/head/color/image_raw/compressed",
             "joint_state": "/sync/joint_states",
-            "action_command": "/la/servo_node/delta_twist_cmds",
+            "action_command": "/sync/la/servo_node/delta_twist_cmds",
         }
 
     def load_rosbag_data(self, rosbag_path: str, max_samples: int = 100) -> Dict[str, List]:
@@ -326,53 +346,86 @@ class PredictionEvaluator:
         storage_options = rosbag2_py.StorageOptions(uri=str(rosbag_path), storage_id="mcap")
         converter_options = rosbag2_py.ConverterOptions(input_serialization_format="cdr", output_serialization_format="cdr")
         reader = rosbag2_py.SequentialReader(); reader.open(storage_options, converter_options)
+        
+        topic_types = {t.name: t.type for t in reader.get_all_topics_and_types()}
         messages = {topic: [] for topic in self.topics.values()}
+        print(f"Reading bag... Looking for topics: {list(self.topics.values())}", flush=True)
+        
         while reader.has_next():
-            if min(len(msgs) for msgs in messages.values()) >= max_samples: break
             topic, data, timestamp = reader.read_next()
             if topic in messages:
-                if "image_raw/compressed" in topic: msg_type = get_message("sensor_msgs/msg/CompressedImage")
-                elif "joint_states" in topic: msg_type = get_message("sensor_msgs/msg/JointState")
-                elif "twist_stamped" in topic: msg_type = get_message("geometry_msgs/msg/TwistStamped")
-                else: continue
+                if len(messages[topic]) >= max_samples:
+                    if all(len(msgs) >= max_samples for msgs in messages.values()):
+                        break
+                    continue
+                    
+                msg_type_str = topic_types.get(topic)
+                if not msg_type_str: continue
+                msg_type = get_message(msg_type_str)
                 messages[topic].append(deserialize_message(data, msg_type))
+                
+        for t, msgs in messages.items():
+            print(f"Collected {len(msgs)} messages for topic: {t}", flush=True)
         return messages
 
     def evaluate(self, rosbag_path: str, num_samples: int = 50) -> Dict:
-        print(f"Loading data from: {rosbag_path}")
+        print(f"Loading data from: {rosbag_path}", flush=True)
         messages = self.load_rosbag_data(rosbag_path, num_samples)
-        min_count = min(len(messages[t]) for t in self.topics.values())
+        print("Data loading complete.", flush=True)
+        
+        counts = {t: len(msgs) for t, msgs in messages.items()}
+        print(f"Synchronized message counts: {counts}", flush=True)
+        
+        min_count = min(counts.values())
         num_samples = min(num_samples, min_count)
-        if num_samples == 0: raise ValueError("No synchronized messages")
+        if num_samples == 0:
+            raise ValueError(f"No synchronized messages. Counts: {counts}")
 
         predictions, ground_truth, times = [], [], []
+        print(f"\nStarting evaluation loop for {num_samples} samples...", flush=True)
         for i in range(num_samples):
             try:
-                left = messages[self.topics["left_image"]][i]; head = messages[self.topics["head_image"]][i]
-                joint = messages[self.topics["joint_state"]][i]; action_msg = messages[self.topics["action_command"]][i]
+                print(f"  [{i+1}/{num_samples}] Processing sample...", end="\r", flush=True)
+                left = messages[self.topics["left_image"]][i]
+                head = messages[self.topics["head_image"]][i]
+                joint = messages[self.topics["joint_state"]][i]
+                action_msg = messages[self.topics["action_command"]][i]
+                
                 start = time.perf_counter()
                 pred = self.inference.predict_from_ros_messages(left, head, joint)
                 times.append(time.perf_counter() - start)
-                # Invert back to match model space (which was trained on -twist.linear.x, -twist.linear.y)
                 gt = np.array([-action_msg.twist.linear.x, -action_msg.twist.linear.y], dtype=np.float32)
-                predictions.append(pred[:2]); ground_truth.append(gt)
-            except Exception as e: print(f"Sample {i+1} failed: {e}")
+                predictions.append(pred[:2])
+                ground_truth.append(gt)
+                
+                if (i + 1) % 10 == 0:
+                    avg_t = np.mean(times) * 1000
+                    print(f"\n  [{i+1}/{num_samples}] Done. Avg inference time: {avg_t:.2f} ms", flush=True)
+            except Exception as e:
+                print(f"\n  [{i+1}/{num_samples}] Failed: {e}", flush=True)
         
+        print(f"\nEvaluation loop complete. Calculating metrics...", flush=True)
         predictions, ground_truth = np.array(predictions), np.array(ground_truth)
-        results = {"mae": np.mean(np.abs(predictions - ground_truth), axis=0), "rmse": np.sqrt(np.mean((predictions - ground_truth)**2, axis=0)),
-                   "predictions": predictions, "ground_truth": ground_truth, "inference_times": times}
+        results = {
+            "mae": np.mean(np.abs(predictions - ground_truth), axis=0),
+            "rmse": np.sqrt(np.mean((predictions - ground_truth)**2, axis=0)),
+            "predictions": predictions,
+            "ground_truth": ground_truth,
+            "inference_times": times
+        }
+        print("Metrics calculation complete.", flush=True)
         return results
 
     def plot_results(self, results: Dict, save_path: str = None):
         preds, gt = results["predictions"], results["ground_truth"]
         fig, axes = plt.subplots(1, 2, figsize=(12, 5))
         for i, label in enumerate(["Linear X", "Linear Y"]):
-            axes[i].plot(gt[:, i], label="Ground Truth", linewidth=2)
-            axes[i].plot(preds[:, i], label="Prediction", linewidth=2, alpha=0.7)
+            axes[i].plot(gt[:, i], label="Ground Truth")
+            axes[i].plot(preds[:, i], label="Prediction")
             axes[i].set_title(label); axes[i].legend()
             axes[i].text(0.05, 0.95, f"MAE: {results['mae'][i]:.4f}\nRMSE: {results['rmse'][i]:.4f}", transform=axes[i].transAxes, verticalalignment="top", bbox=dict(facecolor="white", alpha=0.5))
         plt.tight_layout()
-        if save_path: plt.savefig(save_path); print(f"Plot saved to: {save_path}")
+        if save_path: plt.savefig(save_path); print(f"Plot saved to: {save_path}", flush=True)
         plt.show()
 
 
@@ -390,8 +443,8 @@ def main():
     if not ROS_AVAILABLE: return
     evaluator = PredictionEvaluator(args.checkpoint, args.onnx_dir, args.device)
     results = evaluator.evaluate(args.rosbag, args.num_samples)
-    print(f"\nOverall MAE: {np.mean(results['mae']):.4f}, RMSE: {np.mean(results['rmse']):.4f}")
-    print(f"Avg Inference: {np.mean(results['inference_times'])*1000:.2f} ms")
+    print(f"\nOverall MAE: {np.mean(results['mae']):.4f}, RMSE: {np.mean(results['rmse']):.4f}", flush=True)
+    print(f"Avg Inference: {np.mean(results['inference_times'])*1000:.2f} ms", flush=True)
     if args.plot: evaluator.plot_results(results, args.save_plot)
 
 if __name__ == "__main__":

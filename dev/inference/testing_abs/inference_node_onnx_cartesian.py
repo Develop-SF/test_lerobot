@@ -5,9 +5,6 @@ Absolute Action Mode
 
 This node subscribes to sensor topics, runs inference using ONNX Runtime with TensorRT,
 and publishes actions as TwistStamped.
-
-Includes image preprocessing matching the training pipeline.
-Supports Cartesian State (via Forward Kinematics) and Cartesian Actions (TwistStamped).
 """
 
 import sys
@@ -15,8 +12,6 @@ import time
 import threading
 import argparse
 import json
-import datetime
-import os
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple
 from collections import deque
@@ -38,99 +33,64 @@ from std_msgs.msg import Header
 
 
 class ONNXTensorRTInference:
-    """
-    ONNX Runtime with TensorRT backend inference for Cartesian model.
-    """
+    """ONNX Runtime with TensorRT backend inference for Cartesian model."""
 
-    def __init__(
-        self,
-        checkpoint_path: str,
-        onnx_dir: str,
-        device: str = "cuda",
-        debug_dir: Optional[Path] = None,
-    ):
+    def __init__(self, checkpoint_path: str, onnx_dir: str, device: str = "cuda"):
         self.device = device
         self.checkpoint_path = Path(checkpoint_path)
         self.onnx_dir = Path(onnx_dir)
-        self.debug_dir = debug_dir
-        self.debug_step = 0
 
         # Load ONNX configuration
         config_path = self.onnx_dir / "onnx_config.json"
         with open(config_path, "r") as f:
             self.config = json.load(f)
 
-        # Load image_features from the original model config to determine camera order
         self._load_image_features_config()
 
-        print(f"Loaded ONNX config:")
-        print(f"  Horizon: {self.config['horizon']}")
-        print(f"  N obs steps: {self.config['n_obs_steps']}")
-        print(f"  N action steps: {self.config['n_action_steps']}")
-        print(f"  Action dim: {self.config['action_dim']}")
-        print(f"  State dim: {self.config['state_dim']}")
-        print(f"  Inference steps: {self.config['num_inference_steps']}")
-        print(f"  Scheduler: {self.config['noise_scheduler_type']}")
+        print(f"Loaded ONNX config:", flush=True)
+        print(f"  Horizon: {self.config.get('horizon')}", flush=True)
+        print(f"  N obs steps: {self.config.get('n_obs_steps')}", flush=True)
+        print(f"  N action steps: {self.config.get('n_action_steps')}", flush=True)
+        print(f"  Action dim: {self.config.get('action_dim')}", flush=True)
+        print(f"  State dim: {self.config.get('state_dim')}", flush=True)
+        print(f"  Inference steps: {self.config.get('num_inference_steps')}", flush=True)
 
-        # Setup ONNX Runtime sessions with TensorRT
         self._setup_onnx_sessions()
-
-        # Setup noise scheduler (DDIM)
         self._setup_scheduler()
-
-        # Setup normalization
         self._setup_normalization()
 
-        # Image preprocessing parameters
-        self.crop_box = (260, 135, 224, 224)  # (x, y, w, h) for top view
+        self.crop_box = (260, 135, 224, 224)
         self.target_size = (224, 224)
 
-        # Setup center crop if needed
         if self.config.get("crop_shape"):
-            self.center_crop = torchvision.transforms.CenterCrop(
-                self.config["crop_shape"]
-            )
+            self.center_crop = torchvision.transforms.CenterCrop(self.config["crop_shape"])
         else:
             self.center_crop = None
 
-        # Left arm joint names
         self.left_arm_joints = [
-            "la_shoulder_pan_joint",
-            "la_shoulder_lift_joint",
-            "la_elbow_joint",
-            "la_wrist_1_joint",
-            "la_wrist_2_joint",
-            "la_wrist_3_joint",
+            "la_shoulder_pan_joint", "la_shoulder_lift_joint", "la_elbow_joint",
+            "la_wrist_1_joint", "la_wrist_2_joint", "la_wrist_3_joint",
         ]
 
-        # Observation and action queues
         self._queues = {
-            "action": deque(maxlen=self.config["n_action_steps"]),
-            "observation.state": deque(maxlen=self.config["n_obs_steps"]),
-            "observation.images": deque(maxlen=self.config["n_obs_steps"]),
+            "action": deque(maxlen=self.config.get("n_action_steps", 1)),
+            "observation.state": deque(maxlen=self.config.get("n_obs_steps", 1)),
+            "observation.images": deque(maxlen=self.config.get("n_obs_steps", 1)),
         }
 
-        # Metadata for ROS node
-        self.input_mode = "vision_pos"
-        self.output_mode = "cartesian"
-
     def reset(self):
-        """Clear observation and action queues."""
         self._queues["action"].clear()
         self._queues["observation.state"].clear()
         self._queues["observation.images"].clear()
 
     def _setup_onnx_sessions(self):
-        """Setup ONNX Runtime sessions with TensorRT provider."""
-        print("\nInitializing ONNX Runtime sessions with TensorRT...")
+        print("Initializing ONNX Runtime sessions with TensorRT...", flush=True)
         available_providers = ort.get_available_providers()
         providers = []
         if "TensorrtExecutionProvider" in available_providers and self.device == "cuda":
             trt_options = {
-                "device_id": 0,
-                "trt_max_workspace_size": 2147483648,
-                "trt_fp16_enable": True,
-                "trt_engine_cache_enable": True,
+                "device_id": 0, "trt_max_workspace_size": 2147483648,
+                "trt_fp16_enable": True, "trt_engine_cache_enable": True,
                 "trt_engine_cache_path": str(self.onnx_dir / "trt_engines"),
             }
             providers.append(("TensorrtExecutionProvider", trt_options))
@@ -141,17 +101,11 @@ class ONNXTensorRTInference:
         sess_options = ort.SessionOptions()
         sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
-        encoder_path = self.onnx_dir / "rgb_encoder.onnx"
-        self.rgb_encoder_session = ort.InferenceSession(
-            str(encoder_path), sess_options=sess_options, providers=providers
-        )
-        unet_path = self.onnx_dir / "unet.onnx"
-        self.unet_session = ort.InferenceSession(
-            str(unet_path), sess_options=sess_options, providers=providers
-        )
+        self.rgb_encoder_session = ort.InferenceSession(str(self.onnx_dir / "rgb_encoder.onnx"), sess_options=sess_options, providers=providers)
+        self.unet_session = ort.InferenceSession(str(self.onnx_dir / "unet.onnx"), sess_options=sess_options, providers=providers)
+        print(f"Sessions ready using providers: {self.unet_session.get_providers()}", flush=True)
 
     def _setup_scheduler(self):
-        """Setup DDIM scheduler."""
         scheduler_kwargs = {
             "num_train_timesteps": self.config["num_train_timesteps"],
             "beta_start": self.config["beta_start"],
@@ -164,512 +118,176 @@ class ONNXTensorRTInference:
         self.noise_scheduler = DDIMScheduler(**scheduler_kwargs)
 
     def _load_image_features_config(self):
-        """Load the image_features list from the original model config."""
         if not (self.checkpoint_path / "pretrained_model").exists():
             checkpoint_path = self.checkpoint_path / "output" / "checkpoints" / "last"
         else:
             checkpoint_path = self.checkpoint_path
-
-        model_path = checkpoint_path / "pretrained_model"
-        config_path = model_path / "config.json"
-
-        with open(config_path, "r") as f:
+        with open(checkpoint_path / "pretrained_model" / "config.json", "r") as f:
             model_config = json.load(f)
-
-        self.image_features = [
-            "observation.images.sync_left_arm_cam",
-            "observation.images.sync_head_cam",
-        ]
+        self.image_features = ["observation.images.sync_left_arm_cam", "observation.images.sync_head_cam"]
         self.camera_key_map = {}
         for key in self.image_features:
-            if "head" in key:
-                self.camera_key_map["head"] = key
-            elif "left" in key:
-                self.camera_key_map["left"] = key
+            if "head" in key: self.camera_key_map["head"] = key
+            elif "left" in key: self.camera_key_map["left"] = key
 
     def _setup_normalization(self):
-        """Setup normalization from policy stats."""
         from lerobot.common.policies.diffusion.modeling_diffusion import DiffusionPolicy
-
         if not (self.checkpoint_path / "pretrained_model").exists():
             checkpoint_path = self.checkpoint_path / "output" / "checkpoints" / "last"
         else:
             checkpoint_path = self.checkpoint_path
-
-        model_path = checkpoint_path / "pretrained_model"
-        policy = DiffusionPolicy.from_pretrained(str(model_path))
-
-        self.norm_stats = {}
-        self.unnorm_stats = {}
-
+        policy = DiffusionPolicy.from_pretrained(str(checkpoint_path / "pretrained_model"))
+        self.norm_stats, self.unnorm_stats = {}, {}
         if hasattr(policy, "normalize_inputs") and policy.normalize_inputs is not None:
-            for buffer_name in dir(policy.normalize_inputs):
-                if buffer_name.startswith("buffer_"):
-                    feature_name = buffer_name.replace("buffer_", "").replace("_", ".")
-                    buffer = getattr(policy.normalize_inputs, buffer_name)
-                    stats = {}
-                    if hasattr(buffer, "mean") and hasattr(buffer, "std"):
-                        stats["mode"] = "mean_std"
-                        stats["mean"] = buffer["mean"].cpu().numpy()
-                        stats["std"] = buffer["std"].cpu().numpy()
-                    elif hasattr(buffer, "min") and hasattr(buffer, "max"):
-                        stats["mode"] = "min_max"
-                        stats["min"] = buffer["min"].cpu().numpy()
-                        stats["max"] = buffer["max"].cpu().numpy()
-                    if stats:
-                        self.norm_stats[feature_name] = stats
-
+            for b in dir(policy.normalize_inputs):
+                if b.startswith("buffer_"):
+                    name = b.replace("buffer_", "").replace("_", "."); buf = getattr(policy.normalize_inputs, b)
+                    if hasattr(buf, "mean"): self.norm_stats[name] = {"mode": "mean_std", "mean": buf["mean"].cpu().numpy(), "std": buf["std"].cpu().numpy()}
+                    elif hasattr(buf, "min"): self.norm_stats[name] = {"mode": "min_max", "min": buf["min"].cpu().numpy(), "max": buf["max"].cpu().numpy()}
         if hasattr(policy, "normalize_targets") and policy.normalize_targets is not None:
-            for buffer_name in dir(policy.normalize_targets):
-                if buffer_name.startswith("buffer_"):
-                    feature_name = buffer_name.replace("buffer_", "").replace("_", ".")
-                    buffer = getattr(policy.normalize_targets, buffer_name)
-                    stats = {}
-                    if hasattr(buffer, "mean") and hasattr(buffer, "std"):
-                        stats["mode"] = "mean_std"
-                        stats["mean"] = buffer["mean"].cpu().numpy()
-                        stats["std"] = buffer["std"].cpu().numpy()
-                    elif hasattr(buffer, "min") and hasattr(buffer, "max"):
-                        stats["mode"] = "min_max"
-                        stats["min"] = buffer["min"].cpu().numpy()
-                        stats["max"] = buffer["max"].cpu().numpy()
-                    if stats:
-                        self.unnorm_stats[feature_name] = stats
+            for b in dir(policy.normalize_targets):
+                if b.startswith("buffer_"):
+                    name = b.replace("buffer_", "").replace("_", "."); buf = getattr(policy.normalize_targets, b)
+                    if hasattr(buf, "mean"): self.unnorm_stats[name] = {"mode": "mean_std", "mean": buf["mean"].cpu().numpy(), "std": buf["std"].cpu().numpy()}
+                    elif hasattr(buf, "min"): self.unnorm_stats[name] = {"mode": "min_max", "min": buf["min"].cpu().numpy(), "max": buf["max"].cpu().numpy()}
+        del policy; torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-        del policy
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
-
-    def decode_compressed_image_msg(
-        self, compressed_msg, is_top_view: bool = False
-    ) -> np.ndarray:
-        """Decode ROS CompressedImage message to RGB array with preprocessing."""
-        np_arr = np.frombuffer(compressed_msg.data, np.uint8)
-        image_bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-        if image_bgr is None:
-            raise ValueError("Failed to decode compressed image")
-        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-
+    def decode_compressed_image_msg(self, msg, is_top_view: bool = False) -> np.ndarray:
+        img = cv2.imdecode(np.frombuffer(msg.data, np.uint8), cv2.IMREAD_COLOR)
+        if img is None: raise ValueError("Decode failed")
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         if is_top_view:
             x, y, w, h = self.crop_box
-            image_cropped = image_rgb[y : y + h, x : x + w]
-            image_processed = cv2.rotate(image_cropped, cv2.ROTATE_90_CLOCKWISE)
+            img = cv2.rotate(img[y : y + h, x : x + w], cv2.ROTATE_90_CLOCKWISE)
         else:
-            image_processed = cv2.resize(
-                image_rgb, self.target_size, interpolation=cv2.INTER_AREA
-            )
-        return image_processed
+            img = cv2.resize(img, self.target_size, interpolation=cv2.INTER_AREA)
+        return img
 
-    def _forwardKinematics(self, theta, tcp=None):
-        """Forward kinematics for UR-10e with calibration offsets."""
+    def _forwardKinematics(self, theta):
         a = np.array([0.0000, -0.6127, -0.57155, 0.0000, 0.0000, 0.0000])
         d = np.array([0.1807, 0.0000, 0.0000, 0.17415, 0.11985, 0.11655])
         alpha = np.array([np.pi/2, 0., 0., np.pi/2, -np.pi/2, 0.])
-        
-        delta_a = np.array([3.1576640107943976e-05, 0.298634925475782076, 0.227031257526500829, -8.27068507303316573e-05, 3.6195435783833642e-05, 0])
-        delta_d = np.array([5.82932048768247668e-05, 362.998939868892023, -614.839459588742898, 251.84113332747981, 0.000164511802564715204, -0.000899906496469232708])
-        delta_alpha = np.array([-0.000774756642435869836, 0.00144883356002286951, -0.00181081418698111852, 0.00068792563586761446, 0.000450856239573305118, 0])
-        delta_theta = np.array([1.09391516130152855e-07, 1.03245736607748673, 6.17452995676434124, -0.92380698472218048, 6.42771759845617296e-07, -3.18941184192234051e-08])
-
-        a += delta_a
-        d += delta_d
-        alpha += delta_alpha
-        theta = theta.copy() + delta_theta
-
+        delta_a = np.array([3.15e-5, 0.2986, 0.2270, -8.27e-5, 3.61e-5, 0])
+        delta_d = np.array([5.82e-5, 362.99, -614.83, 251.84, 0.00016, -0.00089])
+        delta_alpha = np.array([-0.00077, 0.00144, -0.00181, 0.00068, 0.00045, 0])
+        delta_theta = np.array([1.09e-7, 1.032, 6.174, -0.923, 6.42e-7, -3.18e-8])
+        a += delta_a; d += delta_d; alpha += delta_alpha; theta = theta.copy() + delta_theta
         ot = np.eye(4)
         for i in range(6):
             ot = ot @ np.array([[np.cos(theta[i]), -(np.sin(theta[i]))*np.cos(alpha[i]), np.sin(theta[i])*np.sin(alpha[i]), a[i]*np.cos(theta[i])],[np.sin(theta[i]),np.cos(theta[i])*np.cos(alpha[i]),-(np.cos(theta[i]))*np.sin(alpha[i]),a[i]*np.sin(theta[i])], [0.0,np.sin(alpha[i]),np.cos(alpha[i]),d[i]],[0.0,0.0,0.0,1.0]])
-
         return np.array([ot[0,3], ot[1,3], ot[2,3]])
 
-    def extract_cartesian_state_from_joints(self, joint_state_msg) -> np.ndarray:
-        """Extract cartesian position (x, y) from JointState message."""
-        joint_names = list(joint_state_msg.name)
-        positions = np.array(joint_state_msg.position, dtype=np.float32)
-
-        left_arm_indices = []
-        for joint_name in self.left_arm_joints:
-            if joint_name in joint_names:
-                left_arm_indices.append(joint_names.index(joint_name))
-
-        if len(left_arm_indices) < 6:
-            raise ValueError(f"Expected 6 left arm joints, found {len(left_arm_indices)}")
-
-        theta = positions[left_arm_indices[:6]]
-        cartesian_pose = self._forwardKinematics(theta)
-        # Return (-x, -y) as per reference implementation
-        return np.array([-cartesian_pose[0], -cartesian_pose[1]], dtype=np.float32)
-
-    def preprocess_image(self, image: np.ndarray) -> np.ndarray:
-        """Preprocess image for model input (CHW format, normalized)."""
-        image_normalized = image.astype(np.float32) / 255.0
-        image_chw = np.transpose(image_normalized, (2, 0, 1))
-        return image_chw
+    def extract_cartesian_state_from_joints(self, msg) -> np.ndarray:
+        names = list(msg.name); pos = np.array(msg.position, dtype=np.float32)
+        idx = [names.index(j) for j in self.left_arm_joints if j in names]
+        if len(idx) < 6: raise ValueError("Missing joints")
+        cart = self._forwardKinematics(pos[idx[:6]])
+        return np.array([-cart[0], -cart[1]], dtype=np.float32)
 
     def _normalize_state(self, state: np.ndarray) -> np.ndarray:
-        """Normalize state observation."""
         if "observation.state" in self.norm_stats:
-            stats = self.norm_stats["observation.state"]
-            if stats.get("mode") == "min_max":
-                min_val = stats["min"]
-                max_val = stats["max"]
-                state = (state - min_val) / (max_val - min_val + 1e-8)
-                state = state * 2 - 1
-            elif stats.get("mode") == "mean_std":
-                mean = stats["mean"]
-                std = stats["std"]
-                state = (state - mean) / (std + 1e-8)
+            s = self.norm_stats["observation.state"]; dim = state.shape[-1]
+            if s["mode"] == "min_max":
+                mi = s["min"][:dim] if s["min"].shape[-1] > dim else s["min"]
+                ma = s["max"][:dim] if s["max"].shape[-1] > dim else s["max"]
+                state = ((state - mi) / (ma - mi + 1e-8)) * 2 - 1
+            elif s["mode"] == "mean_std":
+                m = s["mean"][:dim] if s["mean"].shape[-1] > dim else s["mean"]
+                st = s["std"][:dim] if s["std"].shape[-1] > dim else s["std"]
+                state = (state - m) / (st + 1e-8)
         return state
 
-    def _normalize_image(self, image: np.ndarray) -> np.ndarray:
-        """Normalize image observation."""
-        possible_keys = [
-            "observation.image",
-            "observation.images.sync_left_arm_cam",
-            "observation.images.sync_head_cam",
-        ]
-        for key in possible_keys:
-            if key in self.norm_stats:
-                stats = self.norm_stats[key]
-                if stats.get("mode") == "mean_std":
-                    mean = stats["mean"].reshape(3, 1, 1)
-                    std = stats["std"].reshape(3, 1, 1)
-                    image = (image - mean) / (std + 1e-8)
-                break
-        return image
-
-    def _unnormalize_action(self, action: np.ndarray) -> np.ndarray:
-        """Unnormalize action."""
-        if "action" in self.unnorm_stats:
-            stats = self.unnorm_stats["action"]
-            if stats.get("mode") == "min_max":
-                action = (action + 1) / 2
-                min_val = stats["min"]
-                max_val = stats["max"]
-                action = action * (max_val - min_val) + min_val
-            elif stats.get("mode") == "mean_std":
-                mean = stats["mean"]
-                std = stats["std"]
-                action = action * (std + 1e-8) + mean
-        return action
-
-    def _encode_images(self, images: np.ndarray) -> np.ndarray:
-        """Encode images using ONNX RGB encoder."""
-        if torch.is_tensor(images):
-            images = images.cpu().numpy()
-
-        batch_size, n_cameras = images.shape[:2]
-        images_flat = images.reshape(-1, *images.shape[2:])
-
-        if self.center_crop is not None:
-            images_tensor = torch.from_numpy(images_flat)
-            images_cropped = self.center_crop(images_tensor)
-            images_flat = images_cropped.numpy()
-
-        features_flat = self.rgb_encoder_session.run(
-            ["features"], {"image": images_flat}
-        )[0]
-        features = features_flat.reshape(batch_size, -1)
-        return features
-
-    def predict(self, left_image, head_image, cartesian_state) -> np.ndarray:
-        """Run inference on preprocessed inputs."""
-        left_processed = self.preprocess_image(left_image)
-        head_processed = self.preprocess_image(head_image)
-        left_normalized = self._normalize_image(left_processed)
-        head_normalized = self._normalize_image(head_processed)
-
-        batch_images = {}
-        if "left" in self.camera_key_map:
-            batch_images[self.camera_key_map["left"]] = left_normalized
-        if "head" in self.camera_key_map:
-            batch_images[self.camera_key_map["head"]] = head_normalized
-
-        images_stacked = np.stack(
-            [batch_images[key] for key in self.image_features], axis=0
-        )
-
-        state_normalized = self._normalize_state(cartesian_state)
-        self._queues["observation.state"].append(state_normalized)
-        self._queues["observation.images"].append(images_stacked)
+    def predict(self, left, head, state) -> np.ndarray:
+        l_norm = self._normalize_image(np.transpose(left.astype(np.float32)/255.0, (2,0,1)))
+        h_norm = self._normalize_image(np.transpose(head.astype(np.float32)/255.0, (2,0,1)))
+        img_map = {self.camera_key_map["left"]: l_norm, self.camera_key_map["head"]: h_norm}
+        imgs = np.stack([img_map[k] for k in self.image_features], axis=0)
+        s_norm = self._normalize_state(state)
+        self._queues["observation.state"].append(s_norm); self._queues["observation.images"].append(imgs)
 
         if len(self._queues["action"]) == 0:
-            state_list = list(self._queues["observation.state"])
-            images_list = list(self._queues["observation.images"])
+            sl, il = list(self._queues["observation.state"]), list(self._queues["observation.images"])
+            while len(sl) < self.config["n_obs_steps"]: sl.insert(0, sl[0]); il.insert(0, il[0])
+            sb, ib = np.stack(sl[-self.config["n_obs_steps"]:], axis=0)[np.newaxis, ...], np.stack(il[-self.config["n_obs_steps"]:], axis=0)[np.newaxis, ...]
+            # Pad state if model expects 6 but we derived 2
+            if sb.shape[-1] < self.config["state_dim"]:
+                sb = np.concatenate([sb, np.zeros((sb.shape[0], sb.shape[1], self.config["state_dim"] - sb.shape[-1]), dtype=np.float32)], axis=-1)
+            elif sb.shape[-1] > self.config["state_dim"]: sb = sb[..., :self.config["state_dim"]]
 
-            while len(state_list) < self.config["n_obs_steps"]:
-                state_list.insert(0, state_list[0] if state_list else state_normalized)
-                images_list.insert(0, images_list[0] if images_list else images_stacked)
+            feats = self.rgb_encoder_session.run(["features"], {"image": ib.reshape(-1, *ib.shape[2:])})[0].reshape(1, self.config["n_obs_steps"], -1)
+            cond = np.concatenate([sb, feats], axis=2).reshape(1, -1).astype(np.float32)
+            sample = np.random.randn(1, self.config["horizon"], self.config["action_dim"]).astype(np.float32)
+            self.noise_scheduler.set_timesteps(self.config.get("num_inference_steps", 16))
+            for t in self.noise_scheduler.timesteps:
+                out = self.unet_session.run(["noise_pred"], {"sample": sample, "timestep": np.array([t.item()], dtype=np.int64), "global_cond": cond})[0]
+                sample = self.noise_scheduler.step(torch.from_numpy(out), t, torch.from_numpy(sample)).prev_sample.numpy()
+            
+            start = self.config["n_obs_steps"] - 1
+            chunk = sample[:, start : start + self.config["n_action_steps"]]
+            unnorm = chunk
+            if "action" in self.unnorm_stats:
+                s = self.unnorm_stats["action"]
+                if s["mode"] == "min_max": unnorm = ((chunk + 1) / 2) * (s["max"] - s["min"]) + s["min"]
+                elif s["mode"] == "mean_std": unnorm = chunk * (s["std"] + 1e-8) + s["mean"]
+            self._queues["action"].extend(unnorm[0])
+        return self._queues["action"].popleft()
 
-            state_list = state_list[-self.config["n_obs_steps"] :]
-            images_list = images_list[-self.config["n_obs_steps"] :]
+    def _normalize_image(self, img):
+        for k in ["observation.image", "observation.images.sync_left_arm_cam", "observation.images.sync_head_cam"]:
+            if k in self.norm_stats:
+                s = self.norm_stats[k]
+                if s["mode"] == "mean_std": img = (img - s["mean"].reshape(3,1,1)) / (s["std"].reshape(3,1,1) + 1e-8)
+                break
+        return img
 
-            state_batch = np.stack(state_list, axis=0)[np.newaxis, ...]
-            images_batch = np.stack(images_list, axis=0)[np.newaxis, ...]
-
-            action_chunk_unnorm = self._run_inference(images_batch, state_batch)
-            self._queues["action"].extend(action_chunk_unnorm[0])
-
-        action = self._queues["action"].popleft()
-        return action
-
-    def _run_inference(self, images_batch, state_batch):
-        """Core inference logic."""
-        batch_size, n_obs_steps, n_cameras, C, H, W = images_batch.shape
-        images_reshaped = images_batch.reshape(
-            batch_size * n_obs_steps, n_cameras, C, H, W
-        )
-        features_reshaped = self._encode_images(images_reshaped)
-        img_features = features_reshaped.reshape(batch_size, n_obs_steps, -1)
-
-        global_cond_unflat = np.concatenate([state_batch, img_features], axis=2)
-        global_cond = global_cond_unflat.reshape(batch_size, -1).astype(np.float32)
-
-        noise = np.random.randn(
-            batch_size, self.config["horizon"], self.config["action_dim"]
-        ).astype(np.float32)
-
-        sample = noise.copy()
-        num_inference_steps = self.config.get(
-            "num_inference_steps", self.config["num_train_timesteps"]
-        )
-        self.noise_scheduler.set_timesteps(num_inference_steps)
-
-        for t in self.noise_scheduler.timesteps:
-            timestep = np.array([t.item()], dtype=np.int64)
-            timestep = np.repeat(timestep, batch_size)
-            model_output = self.unet_session.run(
-                ["noise_pred"],
-                {"sample": sample, "timestep": timestep, "global_cond": global_cond},
-            )[0]
-            sample = self.noise_scheduler.step(
-                torch.from_numpy(model_output), t, torch.from_numpy(sample)
-            ).prev_sample.numpy()
-
-        actions = sample
-        start = self.config["n_obs_steps"] - 1
-        end = start + self.config["n_action_steps"]
-        action_chunk = actions[:, start:end]
-        action_chunk_unnorm = self._unnormalize_action(action_chunk)
-        return action_chunk_unnorm
-
-    def predict_from_ros_messages(
-        self, left_compressed_msg, head_compressed_msg, joint_state_msg
-    ) -> np.ndarray:
-        """Run inference from ROS messages."""
-        left_image = self.decode_compressed_image_msg(
-            left_compressed_msg, is_top_view=False
-        )
-        head_image = self.decode_compressed_image_msg(
-            head_compressed_msg, is_top_view=True
-        )
-        cartesian_state = self.extract_cartesian_state_from_joints(joint_state_msg)
-        return self.predict(left_image, head_image, cartesian_state)
+    def predict_from_ros(self, l_msg, h_msg, j_msg):
+        l = self.decode_compressed_image_msg(l_msg, False); h = self.decode_compressed_image_msg(h_msg, True)
+        return self.predict(l, h, self.extract_cartesian_state_from_joints(j_msg))
 
 
 class InferenceNode(Node):
-    """ROS2 node for LeRobot inference deployment with Cartesian FK."""
-
-    def __init__(
-        self,
-        checkpoint_path: str,
-        onnx_dir: str,
-        device: str = "cuda",
-        inference_frequency: float = 20.0,
-        mode: str = "continuous",
-        debug: bool = False,
-    ):
-        super().__init__("lerobot_inference_node_onnx_cartesian")
-
-        self.mode = mode
-        self.debug = debug
-        self.inference_frequency = inference_frequency
-        self.inference_interval = 1.0 / inference_frequency
-
-        self.inference = ONNXTensorRTInference(
-            checkpoint_path, onnx_dir, device
-        )
-
-        self.latest_messages = {
-            "left_image": None,
-            "head_image": None,
-            "joint_state": None,
-        }
-        self.latest_message_times = {
-            "left_image": 0.0,
-            "head_image": 0.0,
-            "joint_state": 0.0,
-        }
-        self.message_lock = threading.Lock()
-
-        self.inference_running = False
-        self.inference_thread = None
-
-        sensor_qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1,
-        )
-
-        control_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=10,
-        )
-
-        self.left_image_sub = self.create_subscription(
-            CompressedImage,
-            "/sync/emily01/left_arm/color/image_raw/compressed",
-            self.left_image_callback,
-            sensor_qos,
-        )
-
-        self.head_image_sub = self.create_subscription(
-            CompressedImage,
-            "/sync/emily01/head/color/image_raw/compressed",
-            self.head_image_callback,
-            sensor_qos,
-        )
-
-        self.joint_state_sub = self.create_subscription(
-            JointState, "/sync/joint_states", self.joint_state_callback, sensor_qos
-        )
-
-        self.action_pub = self.create_publisher(
-            TwistStamped, "/la/servo_node/delta_twist_cmds", control_qos
-        )
-
-        self.get_logger().info("LeRobot Cartesian ONNX Inference Node ready (Absolute)")
-
-    def left_image_callback(self, msg: CompressedImage):
-        with self.message_lock:
-            self.latest_messages["left_image"] = msg
-            self.latest_message_times["left_image"] = time.time()
-        if self.mode == "triggered":
-            self.trigger_inference()
-
-    def head_image_callback(self, msg: CompressedImage):
-        with self.message_lock:
-            self.latest_messages["head_image"] = msg
-            self.latest_message_times["head_image"] = time.time()
-
-    def joint_state_callback(self, msg: JointState):
-        with self.message_lock:
-            self.latest_messages["joint_state"] = msg
-            self.latest_message_times["joint_state"] = time.time()
-
-    def trigger_inference(self):
-        with self.message_lock:
-            required = ["left_image", "head_image", "joint_state"]
-            if any(self.latest_messages[m] is None for m in required):
-                return
-            left_msg = self.latest_messages["left_image"]
-            head_msg = self.latest_messages["head_image"]
-            joint_msg = self.latest_messages["joint_state"]
-
-        if not self.inference_running:
-            threading.Thread(
-                target=self.run_inference_threaded,
-                args=(left_msg, head_msg, joint_msg),
-                daemon=True,
-            ).start()
-
-    def start_inference_loop(self):
-        if self.mode != "continuous": return
-        self.inference_running = True
-        self.inference_thread = threading.Thread(target=self.continuous_inference_loop, daemon=True)
-        self.inference_thread.start()
-
-    def stop_inference_loop(self):
-        self.inference_running = False
-        if self.inference_thread: self.inference_thread.join(timeout=2.0)
-
-    def continuous_inference_loop(self):
-        while self.inference_running:
-            loop_start = time.time()
-            try:
-                with self.message_lock:
-                    required = ["left_image", "head_image", "joint_state"]
-                    if all(self.latest_messages[m] is not None for m in required):
-                        left_msg = self.latest_messages["left_image"]
-                        head_msg = self.latest_messages["head_image"]
-                        joint_msg = self.latest_messages["joint_state"]
-                        self.run_inference_synchronous(left_msg, head_msg, joint_msg)
-            except Exception as e:
-                self.get_logger().error(f"Inference loop error: {e}")
-            elapsed = time.time() - loop_start
-            time.sleep(max(0, self.inference_interval - elapsed))
-
-    def run_inference_threaded(self, left_msg, head_msg, joint_msg):
-        self.inference_running = True
-        try:
-            action = self.inference.predict_from_ros_messages(left_msg, head_msg, joint_msg)
-            self.publish_action(action)
-        except Exception as e:
-            self.get_logger().error(f"Threaded inference failed: {e}")
-        finally:
-            self.inference_running = False
-
-    def run_inference_synchronous(self, left_msg, head_msg, joint_msg):
-        try:
-            action = self.inference.predict_from_ros_messages(left_msg, head_msg, joint_msg)
-            self.publish_action(action)
-        except Exception as e:
-            self.get_logger().error(f"Inference failed: {e}")
-
-    def publish_action(self, action: np.ndarray):
-        """Publish action as TwistStamped message."""
-        if action is None: return
-        # action is expected to be 2D for linear.x and linear.y
-        if len(action) < 2:
-            self.get_logger().error(f"Expected at least 2D action, got {len(action)}D")
-            return
-
-        msg = TwistStamped()
-        msg.header = Header()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = "base_link"
+    def __init__(self, checkpoint, onnx_dir, device="cuda", freq=20.0):
+        super().__init__("lerobot_inference_onnx_cartesian")
+        self.inference = ONNXTensorRTInference(checkpoint, onnx_dir, device)
+        self.interval = 1.0 / freq
+        self.latest = {"left": None, "head": None, "joints": None}
+        self.lock = threading.Lock(); self.running = False
         
-        # Apply model output to linear x and y
-        # Invert back to match robot frame
-        msg.twist.linear.x = float(-action[0])
-        msg.twist.linear.y = float(-action[1])
-        msg.twist.linear.z = 0.0
-        msg.twist.angular.x = 0.0
-        msg.twist.angular.y = 0.0
-        msg.twist.angular.z = 0.0
-        
-        self.action_pub.publish(msg)
+        sensor_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=1)
+        self.create_subscription(CompressedImage, "/sync/emily01/left_arm/color/image_raw/compressed", self.cb_left, sensor_qos)
+        self.create_subscription(CompressedImage, "/sync/emily01/head/color/image_raw/compressed", self.cb_head, sensor_qos)
+        self.create_subscription(JointState, "/sync/joint_states", self.cb_joints, sensor_qos)
+        self.pub = self.create_publisher(TwistStamped, "/la/servo_node/delta_twist_cmds", QoSProfile(reliability=ReliabilityPolicy.RELIABLE, depth=10))
+        self.get_logger().info("Inference Node Ready (2D Cartesian State -> Twist)", once=True)
 
+    def cb_left(self, msg):
+        with self.lock: self.latest["left"] = msg
+    def cb_head(self, msg):
+        with self.lock: self.latest["head"] = msg
+    def cb_joints(self, msg):
+        with self.lock: self.latest["joints"] = msg
+
+    def start(self):
+        self.running = True; threading.Thread(target=self.loop, daemon=True).start()
+    def loop(self):
+        while self.running:
+            start = time.time()
+            with self.lock:
+                if all(self.latest[k] is not None for k in ["left", "head", "joints"]):
+                    l, h, j = self.latest["left"], self.latest["head"], self.latest["joints"]
+                    try:
+                        act = self.inference.predict_from_ros(l, h, j)
+                        msg = TwistStamped(); msg.header.stamp = self.get_clock().now().to_msg(); msg.header.frame_id = "base_link"
+                        msg.twist.linear.x = float(-act[0]); msg.twist.linear.y = float(-act[1])
+                        self.pub.publish(msg)
+                    except Exception as e: self.get_logger().error(f"Inference failed: {e}")
+            while time.time() - start < self.interval: time.sleep(0.001)
 
 def main():
-    parser = argparse.ArgumentParser(description="LeRobot Cartesian ONNX Inference Node")
-    parser.add_argument("--checkpoint", type=str, required=True)
-    parser.add_argument("--onnx-dir", type=str, required=True)
-    parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--frequency", type=float, default=20.0)
-    parser.add_argument("--mode", type=str, default="continuous", choices=["continuous", "triggered"])
-    
-    parsed_args, unknown = parser.parse_known_args()
-    rclpy.init(args=unknown)
-    
-    try:
-        node = InferenceNode(
-            checkpoint_path=parsed_args.checkpoint,
-            onnx_dir=parsed_args.onnx_dir,
-            device=parsed_args.device,
-            inference_frequency=parsed_args.frequency,
-            mode=parsed_args.mode
-        )
-        if parsed_args.mode == "continuous":
-            node.start_inference_loop()
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        if "node" in locals():
-            node.stop_inference_loop()
-            node.destroy_node()
-        rclpy.shutdown()
+    parser = argparse.ArgumentParser(); parser.add_argument("--checkpoint", required=True); parser.add_argument("--onnx-dir", required=True)
+    parser.add_argument("--device", default="cuda"); parser.add_argument("--frequency", type=float, default=20.0)
+    args = parser.parse_args(); rclpy.init()
+    node = InferenceNode(args.checkpoint, args.onnx_dir, args.device, args.frequency)
+    node.start(); rclpy.spin(node); rclpy.shutdown()
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
