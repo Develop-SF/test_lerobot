@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
-ROS2 Inference Node for LeRobot Deployment - Cartesian Mode (ONNX+TensorRT)
+ROS2 Inference Node for LeRobot Deployment - Approach Plate (ONNX+TensorRT)
 Absolute Action Mode
 
 This node subscribes to sensor topics, runs inference using ONNX Runtime with TensorRT,
-and publishes actions as TwistStamped.
+and publishes actions.
+
+Includes image preprocessing matching the training pipeline:
+- Top view (head camera): Crop (260, 135, 178, 224) → Rotate 90° CW → 224×178
+- Left arm camera: Resize to 224×178
 """
 
 import sys
@@ -12,6 +16,8 @@ import time
 import threading
 import argparse
 import json
+import datetime
+import os
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple
 from collections import deque
@@ -33,79 +39,151 @@ from std_msgs.msg import Header
 
 
 class ONNXTensorRTInference:
-    """ONNX Runtime with TensorRT backend inference for Cartesian model."""
+    """ONNX Runtime with TensorRT backend inference for Approach Real Bing 20Hz model (Absolute)."""
 
-    def __init__(self, checkpoint_path: str, onnx_dir: str, device: str = "cuda"):
+    def __init__(
+        self,
+        checkpoint_path: str,
+        onnx_dir: str,
+        device: str = "cuda",
+        debug_dir: Optional[Path] = None,
+    ):
+        """
+        Initialize the ONNX+TensorRT inference system.
+
+        Args:
+            checkpoint_path: Path to original model checkpoint (for normalization stats)
+            onnx_dir: Path to ONNX models directory
+            device: Device for inference ("cuda" or "cpu")
+        """
         self.device = device
         self.checkpoint_path = Path(checkpoint_path)
         self.onnx_dir = Path(onnx_dir)
+        self.debug_dir = debug_dir
+        self.debug_step = 0
 
         # Load ONNX configuration
         config_path = self.onnx_dir / "onnx_config.json"
         with open(config_path, "r") as f:
             self.config = json.load(f)
 
+        # Load image_features from the original model config to determine camera order
         self._load_image_features_config()
 
-        print(f"Loaded ONNX config:", flush=True)
-        print(f"  Horizon: {self.config.get('horizon')}", flush=True)
-        print(f"  N obs steps: {self.config.get('n_obs_steps')}", flush=True)
-        print(f"  N action steps: {self.config.get('n_action_steps')}", flush=True)
-        print(f"  Action dim: {self.config.get('action_dim')}", flush=True)
-        print(f"  State dim: {self.config.get('state_dim')}", flush=True)
-        print(f"  Inference steps: {self.config.get('num_inference_steps')}", flush=True)
+        print(f"Loaded ONNX config:")
+        print(f"  Horizon: {self.config['horizon']}")
+        print(f"  N obs steps: {self.config['n_obs_steps']}")
+        print(f"  N action steps: {self.config['n_action_steps']}")
+        print(f"  Action dim: {self.config['action_dim']}")
+        print(f"  State dim: {self.config['state_dim']}")
+        print(f"  Inference steps: {self.config['num_inference_steps']}")
+        print(f"  Scheduler: {self.config['noise_scheduler_type']}")
 
+        # Setup ONNX Runtime sessions with TensorRT
         self._setup_onnx_sessions()
+
+        # Setup noise scheduler (DDIM with 16 steps)
         self._setup_scheduler()
+
+        # Setup normalization
         self._setup_normalization()
 
-        self.crop_box = (260, 135, 224, 224)
-        self.target_size = (224, 224)
+        # Image preprocessing parameters (from training pipeline/lerobot_inference.py)
+        self.crop_box = (260, 135, 224, 224)  # (x, y, w, h) for top view (head camera)
+        self.target_size = (224, 224)  # (width, height) for both cameras
 
+        # Setup center crop if needed (for ONNX encoder)
         if self.config.get("crop_shape"):
-            self.center_crop = torchvision.transforms.CenterCrop(self.config["crop_shape"])
+            self.center_crop = torchvision.transforms.CenterCrop(
+                self.config["crop_shape"]
+            )
         else:
             self.center_crop = None
 
+        # Left arm joint names
         self.left_arm_joints = [
-            "la_shoulder_pan_joint", "la_shoulder_lift_joint", "la_elbow_joint",
-            "la_wrist_1_joint", "la_wrist_2_joint", "la_wrist_3_joint",
+            "la_shoulder_pan_joint",
+            "la_shoulder_lift_joint",
+            "la_elbow_joint",
+            "la_wrist_1_joint",
+            "la_wrist_2_joint",
+            "la_wrist_3_joint",
         ]
 
+        # Observation and action queues (matching DiffusionPolicy.reset())
         self._queues = {
-            "action": deque(maxlen=self.config.get("n_action_steps", 1)),
-            "observation.state": deque(maxlen=self.config.get("n_obs_steps", 1)),
-            "observation.images": deque(maxlen=self.config.get("n_obs_steps", 1)),
+            "action": deque(maxlen=self.config["n_action_steps"]),
+            "observation.state": deque(maxlen=self.config["n_obs_steps"]),
+            "observation.images": deque(maxlen=self.config["n_obs_steps"]),
         }
 
+        print(f"\nImage preprocessing:")
+        print(
+            f"  - Head camera: Crop {self.crop_box} → Rotate 90° CW → {self.target_size}"
+        )
+        print(f"  - Left arm camera: Resize to {self.target_size}")
+
+        # Metadata for ROS node
+        self.input_mode = (
+            "vision_pos"  # Assuming vision + position based on model structure
+        )
+        self.output_mode = "pos_only"  # Assuming position only output
+
     def reset(self):
+        """Clear observation and action queues."""
         self._queues["action"].clear()
         self._queues["observation.state"].clear()
         self._queues["observation.images"].clear()
 
     def _setup_onnx_sessions(self):
-        print("Initializing ONNX Runtime sessions with TensorRT...", flush=True)
+        """Setup ONNX Runtime sessions with TensorRT provider."""
+        print("\nInitializing ONNX Runtime sessions with TensorRT...")
+
+        # Check available providers
         available_providers = ort.get_available_providers()
+        print(f"Available providers: {available_providers}")
+
+        # Configure providers
         providers = []
         if "TensorrtExecutionProvider" in available_providers and self.device == "cuda":
             trt_options = {
-                "device_id": 0, "trt_max_workspace_size": 2147483648,
-                "trt_fp16_enable": True, "trt_engine_cache_enable": True,
+                "device_id": 0,
+                "trt_max_workspace_size": 2147483648,  # 2GB
+                "trt_fp16_enable": True,
+                "trt_engine_cache_enable": True,
                 "trt_engine_cache_path": str(self.onnx_dir / "trt_engines"),
             }
             providers.append(("TensorrtExecutionProvider", trt_options))
+            print("  ✓ TensorRT enabled with FP16")
         elif "CUDAExecutionProvider" in available_providers and self.device == "cuda":
             providers.append("CUDAExecutionProvider")
+            print("  ℹ️  TensorRT not available, using CUDA")
+
         providers.append("CPUExecutionProvider")
 
         sess_options = ort.SessionOptions()
-        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        sess_options.graph_optimization_level = (
+            ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        )
 
-        self.rgb_encoder_session = ort.InferenceSession(str(self.onnx_dir / "rgb_encoder.onnx"), sess_options=sess_options, providers=providers)
-        self.unet_session = ort.InferenceSession(str(self.onnx_dir / "unet.onnx"), sess_options=sess_options, providers=providers)
-        print(f"Sessions ready using providers: {self.unet_session.get_providers()}", flush=True)
+        # Load RGB encoder
+        encoder_path = self.onnx_dir / "rgb_encoder.onnx"
+        self.rgb_encoder_session = ort.InferenceSession(
+            str(encoder_path), sess_options=sess_options, providers=providers
+        )
+        print(f"  ✓ RGB encoder loaded from {encoder_path}")
+        print(f"    Using: {self.rgb_encoder_session.get_providers()[0]}")
+
+        # Load UNet
+        unet_path = self.onnx_dir / "unet.onnx"
+        self.unet_session = ort.InferenceSession(
+            str(unet_path), sess_options=sess_options, providers=providers
+        )
+        print(f"  ✓ UNet loaded from {unet_path}")
+        print(f"    Using: {self.unet_session.get_providers()[0]}")
 
     def _setup_scheduler(self):
+        """Setup DDIM scheduler with 16 steps."""
         scheduler_kwargs = {
             "num_train_timesteps": self.config["num_train_timesteps"],
             "beta_start": self.config["beta_start"],
@@ -115,179 +193,1004 @@ class ONNXTensorRTInference:
             "clip_sample_range": self.config["clip_sample_range"],
             "prediction_type": self.config["prediction_type"],
         }
+
         self.noise_scheduler = DDIMScheduler(**scheduler_kwargs)
+        print(
+            f"  ✓ Scheduler: {self.config['noise_scheduler_type']} with {self.config['num_inference_steps']} steps"
+        )
 
     def _load_image_features_config(self):
+        """Load the image_features list from the original model config."""
+        # Resolve checkpoint path
         if not (self.checkpoint_path / "pretrained_model").exists():
             checkpoint_path = self.checkpoint_path / "output" / "checkpoints" / "last"
         else:
             checkpoint_path = self.checkpoint_path
-        with open(checkpoint_path / "pretrained_model" / "config.json", "r") as f:
+
+        model_path = checkpoint_path / "pretrained_model"
+        config_path = model_path / "config.json"
+
+        with open(config_path, "r") as f:
             model_config = json.load(f)
-        self.image_features = ["observation.images.sync_left_arm_cam", "observation.images.sync_head_cam"]
+
+        # HARDCODED ORDER TO MATCH PYTORCH VERSION
+        # PyTorch uses insertion order of the dict, which happens to be [left, head] for this model
+        self.image_features = [
+            "observation.images.sync_left_arm_cam",
+            "observation.images.sync_head_cam",
+        ]
+        print(f"  ✓ Loaded image features order (HARDCODED): {self.image_features}")
+
+        # Map known camera roles to their config keys
         self.camera_key_map = {}
         for key in self.image_features:
-            if "head" in key: self.camera_key_map["head"] = key
-            elif "left" in key: self.camera_key_map["left"] = key
+            if "head" in key:
+                self.camera_key_map["head"] = key
+            elif "left" in key:
+                self.camera_key_map["left"] = key
+
+        print(f"  ✓ Camera key map: {self.camera_key_map}")
 
     def _setup_normalization(self):
+        """Setup normalization from policy's normalize_inputs/normalize_targets."""
         from lerobot.common.policies.diffusion.modeling_diffusion import DiffusionPolicy
+
+        # Resolve checkpoint path
         if not (self.checkpoint_path / "pretrained_model").exists():
             checkpoint_path = self.checkpoint_path / "output" / "checkpoints" / "last"
         else:
             checkpoint_path = self.checkpoint_path
-        policy = DiffusionPolicy.from_pretrained(str(checkpoint_path / "pretrained_model"))
-        self.norm_stats, self.unnorm_stats = {}, {}
+
+        model_path = checkpoint_path / "pretrained_model"
+
+        # Load the policy to extract normalization stats
+        print(f"  Loading policy to extract normalization stats...")
+        policy = DiffusionPolicy.from_pretrained(str(model_path))
+
+        self.norm_stats = {}
+        self.unnorm_stats = {}
+
+        # Extract input normalization from normalize_inputs
         if hasattr(policy, "normalize_inputs") and policy.normalize_inputs is not None:
-            for b in dir(policy.normalize_inputs):
-                if b.startswith("buffer_"):
-                    name = b.replace("buffer_", "").replace("_", "."); buf = getattr(policy.normalize_inputs, b)
-                    if hasattr(buf, "mean"): self.norm_stats[name] = {"mode": "mean_std", "mean": buf["mean"].cpu().numpy(), "std": buf["std"].cpu().numpy()}
-                    elif hasattr(buf, "min"): self.norm_stats[name] = {"mode": "min_max", "min": buf["min"].cpu().numpy(), "max": buf["max"].cpu().numpy()}
-        if hasattr(policy, "normalize_targets") and policy.normalize_targets is not None:
-            for b in dir(policy.normalize_targets):
-                if b.startswith("buffer_"):
-                    name = b.replace("buffer_", "").replace("_", "."); buf = getattr(policy.normalize_targets, b)
-                    if hasattr(buf, "mean"): self.unnorm_stats[name] = {"mode": "mean_std", "mean": buf["mean"].cpu().numpy(), "std": buf["std"].cpu().numpy()}
-                    elif hasattr(buf, "min"): self.unnorm_stats[name] = {"mode": "min_max", "min": buf["min"].cpu().numpy(), "max": buf["max"].cpu().numpy()}
-        del policy; torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            # Iterate through all buffer parameters in normalize_inputs
+            for buffer_name in dir(policy.normalize_inputs):
+                if buffer_name.startswith("buffer_"):
+                    # Extract the original name (e.g., 'buffer_observation_state' -> 'observation.state')
+                    feature_name = buffer_name.replace("buffer_", "").replace("_", ".")
+                    buffer = getattr(policy.normalize_inputs, buffer_name)
 
-    def decode_compressed_image_msg(self, msg, is_top_view: bool = False) -> np.ndarray:
-        img = cv2.imdecode(np.frombuffer(msg.data, np.uint8), cv2.IMREAD_COLOR)
-        if img is None: raise ValueError("Decode failed")
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    # Check what normalization parameters exist
+                    stats = {}
+                    if hasattr(buffer, "mean") and hasattr(buffer, "std"):
+                        stats["mode"] = "mean_std"
+                        stats["mean"] = buffer["mean"].cpu().numpy()
+                        stats["std"] = buffer["std"].cpu().numpy()
+                        print(
+                            f"  ✓ Loaded normalization for {feature_name} (mode: mean_std)"
+                        )
+                    elif hasattr(buffer, "min") and hasattr(buffer, "max"):
+                        stats["mode"] = "min_max"
+                        stats["min"] = buffer["min"].cpu().numpy()
+                        stats["max"] = buffer["max"].cpu().numpy()
+                        print(
+                            f"  ✓ Loaded normalization for {feature_name} (mode: min_max)"
+                        )
+
+                    if stats:
+                        self.norm_stats[feature_name] = stats
+
+        # Extract output unnormalization from normalize_targets (used for unnormalization)
+        if (
+            hasattr(policy, "normalize_targets")
+            and policy.normalize_targets is not None
+        ):
+            # Iterate through all buffer parameters in normalize_targets
+            for buffer_name in dir(policy.normalize_targets):
+                if buffer_name.startswith("buffer_"):
+                    # Extract the original name (e.g., 'buffer_action' -> 'action')
+                    feature_name = buffer_name.replace("buffer_", "").replace("_", ".")
+                    buffer = getattr(policy.normalize_targets, buffer_name)
+
+                    # Check what normalization parameters exist
+                    stats = {}
+                    if hasattr(buffer, "mean") and hasattr(buffer, "std"):
+                        stats["mode"] = "mean_std"
+                        stats["mean"] = buffer["mean"].cpu().numpy()
+                        stats["std"] = buffer["std"].cpu().numpy()
+                        print(
+                            f"  ✓ Loaded unnormalization for {feature_name} (mode: mean_std)"
+                        )
+                    elif hasattr(buffer, "min") and hasattr(buffer, "max"):
+                        stats["mode"] = "min_max"
+                        stats["min"] = buffer["min"].cpu().numpy()
+                        stats["max"] = buffer["max"].cpu().numpy()
+                        print(
+                            f"  ✓ Loaded unnormalization for {feature_name} (mode: min_max)"
+                        )
+
+                    if stats:
+                        self.unnorm_stats[feature_name] = stats
+
+        # Clean up policy to free memory
+        del policy
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+        print(f"  Normalization stats keys: {list(self.norm_stats.keys())}")
+        print(f"  Unnormalization stats keys: {list(self.unnorm_stats.keys())}")
+
+    def decode_compressed_image_msg(
+        self, compressed_msg, is_top_view: bool = False
+    ) -> np.ndarray:
+        """Decode ROS CompressedImage message to RGB array with preprocessing."""
+        np_arr = np.frombuffer(compressed_msg.data, np.uint8)
+        image_bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+        if image_bgr is None:
+            raise ValueError("Failed to decode compressed image")
+
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+
         if is_top_view:
+            # Head camera (top view): Crop FIRST, then rotate
             x, y, w, h = self.crop_box
-            img = cv2.rotate(img[y : y + h, x : x + w], cv2.ROTATE_90_CLOCKWISE)
+            image_cropped = image_rgb[y : y + h, x : x + w]
+            image_processed = cv2.rotate(image_cropped, cv2.ROTATE_90_CLOCKWISE)
         else:
-            img = cv2.resize(img, self.target_size, interpolation=cv2.INTER_AREA)
-        return img
+            # Left arm camera: Resize
+            image_processed = cv2.resize(
+                image_rgb, self.target_size, interpolation=cv2.INTER_AREA
+            )
 
-    def _forwardKinematics(self, theta):
+        return image_processed
+    def _forwardKinematics(self, theta, tcp=None):
         a = np.array([0.0000, -0.6127, -0.57155, 0.0000, 0.0000, 0.0000])
         d = np.array([0.1807, 0.0000, 0.0000, 0.17415, 0.11985, 0.11655])
         alpha = np.array([np.pi/2, 0., 0., np.pi/2, -np.pi/2, 0.])
-        delta_a = np.array([3.15e-5, 0.2986, 0.2270, -8.27e-5, 3.61e-5, 0])
-        delta_d = np.array([5.82e-5, 362.99, -614.83, 251.84, 0.00016, -0.00089])
-        delta_alpha = np.array([-0.00077, 0.00144, -0.00181, 0.00068, 0.00045, 0])
-        delta_theta = np.array([1.09e-7, 1.032, 6.174, -0.923, 6.42e-7, -3.18e-8])
+        delta_a = np.array([3.1576640107943976e-05, 0.298634925475782076, 0.227031257526500829, -8.27068507303316573e-05, 3.6195435783833642e-05, 0])
+        delta_d = np.array([5.82932048768247668e-05, 362.998939868892023, -614.839459588742898, 251.84113332747981, 0.000164511802564715204, -0.000899906496469232708])
+        delta_alpha = np.array([-0.000774756642435869836, 0.00144883356002286951, -0.00181081418698111852, 0.00068792563586761446, 0.000450856239573305118, 0])
+        delta_theta = np.array([1.09391516130152855e-07, 1.03245736607748673, 6.17452995676434124, -0.92380698472218048, 6.42771759845617296e-07, -3.18941184192234051e-08])
         a += delta_a; d += delta_d; alpha += delta_alpha; theta = theta.copy() + delta_theta
         ot = np.eye(4)
         for i in range(6):
             ot = ot @ np.array([[np.cos(theta[i]), -(np.sin(theta[i]))*np.cos(alpha[i]), np.sin(theta[i])*np.sin(alpha[i]), a[i]*np.cos(theta[i])],[np.sin(theta[i]),np.cos(theta[i])*np.cos(alpha[i]),-(np.cos(theta[i]))*np.sin(alpha[i]),a[i]*np.sin(theta[i])], [0.0,np.sin(alpha[i]),np.cos(alpha[i]),d[i]],[0.0,0.0,0.0,1.0]])
         return np.array([ot[0,3], ot[1,3], ot[2,3]])
 
-    def extract_cartesian_state_from_joints(self, msg) -> np.ndarray:
-        names = list(msg.name); pos = np.array(msg.position, dtype=np.float32)
-        idx = [names.index(j) for j in self.left_arm_joints if j in names]
-        if len(idx) < 6: raise ValueError("Missing joints")
-        cart = self._forwardKinematics(pos[idx[:6]])
-        return np.array([-cart[0], -cart[1]], dtype=np.float32)
+
+    def extract_joint_positions_msg(self, joint_state_msg) -> np.ndarray:
+        """Extract left arm joint positions from ROS JointState message."""
+        joint_names = list(joint_state_msg.name)
+        positions = np.array(joint_state_msg.position, dtype=np.float32)
+
+        left_arm_indices = []
+        for joint_name in self.left_arm_joints:
+            if joint_name in joint_names:
+                left_arm_indices.append(joint_names.index(joint_name))
+
+        if len(left_arm_indices) != 6:
+            raise ValueError(
+                f"Expected 6 left arm joints, found {len(left_arm_indices)}"
+            )
+
+        joint_positions = positions[left_arm_indices]
+        # Pass joint positions to forward kinematics and return cartesian coordinates
+        cartesian_pose = self._forwardKinematics(joint_positions)
+        return np.array([-cartesian_pose[0], -cartesian_pose[1]], dtype=np.float32)
+    
+
+    def preprocess_image(self, image: np.ndarray) -> np.ndarray:
+        """Preprocess image for model input (CHW format, normalized)."""
+        # Normalize to [0, 1]
+        image_normalized = image.astype(np.float32) / 255.0
+
+        # Convert HWC -> CHW
+        image_chw = np.transpose(image_normalized, (2, 0, 1))
+
+        return image_chw
 
     def _normalize_state(self, state: np.ndarray) -> np.ndarray:
+        """Normalize state observation."""
         if "observation.state" in self.norm_stats:
-            s = self.norm_stats["observation.state"]; dim = state.shape[-1]
-            if s["mode"] == "min_max":
-                mi = s["min"][:dim] if s["min"].shape[-1] > dim else s["min"]
-                ma = s["max"][:dim] if s["max"].shape[-1] > dim else s["max"]
-                state = ((state - mi) / (ma - mi + 1e-8)) * 2 - 1
-            elif s["mode"] == "mean_std":
-                m = s["mean"][:dim] if s["mean"].shape[-1] > dim else s["mean"]
-                st = s["std"][:dim] if s["std"].shape[-1] > dim else s["std"]
-                state = (state - m) / (st + 1e-8)
+            stats = self.norm_stats["observation.state"]
+            if stats.get("mode") == "min_max":
+                min_val = stats["min"]
+                max_val = stats["max"]
+                state = (state - min_val) / (max_val - min_val + 1e-8)
+                state = state * 2 - 1  # Scale to [-1, 1]
         return state
 
-    def predict(self, left, head, state) -> np.ndarray:
-        l_norm = self._normalize_image(np.transpose(left.astype(np.float32)/255.0, (2,0,1)))
-        h_norm = self._normalize_image(np.transpose(head.astype(np.float32)/255.0, (2,0,1)))
-        img_map = {self.camera_key_map["left"]: l_norm, self.camera_key_map["head"]: h_norm}
-        imgs = np.stack([img_map[k] for k in self.image_features], axis=0)
-        s_norm = self._normalize_state(state)
-        self._queues["observation.state"].append(s_norm); self._queues["observation.images"].append(imgs)
+    def _normalize_image(self, image: np.ndarray) -> np.ndarray:
+        """Normalize image observation."""
+        # Try different possible keys (with both underscores and periods)
+        possible_keys = [
+            "observation.image",
+            "observation.images.sync_left_arm_cam",
+            "observation.images.sync.left.arm.cam",
+            "observation.images.sync_head_cam",
+            "observation.images.sync.head.cam",
+        ]
 
-        if len(self._queues["action"]) == 0:
-            sl, il = list(self._queues["observation.state"]), list(self._queues["observation.images"])
-            while len(sl) < self.config["n_obs_steps"]: sl.insert(0, sl[0]); il.insert(0, il[0])
-            sb, ib = np.stack(sl[-self.config["n_obs_steps"]:], axis=0)[np.newaxis, ...], np.stack(il[-self.config["n_obs_steps"]:], axis=0)[np.newaxis, ...]
-            # Pad state if model expects 6 but we derived 2
-            if sb.shape[-1] < self.config["state_dim"]:
-                sb = np.concatenate([sb, np.zeros((sb.shape[0], sb.shape[1], self.config["state_dim"] - sb.shape[-1]), dtype=np.float32)], axis=-1)
-            elif sb.shape[-1] > self.config["state_dim"]: sb = sb[..., :self.config["state_dim"]]
-
-            feats = self.rgb_encoder_session.run(["features"], {"image": ib.reshape(-1, *ib.shape[2:])})[0].reshape(1, self.config["n_obs_steps"], -1)
-            cond = np.concatenate([sb, feats], axis=2).reshape(1, -1).astype(np.float32)
-            sample = np.random.randn(1, self.config["horizon"], self.config["action_dim"]).astype(np.float32)
-            self.noise_scheduler.set_timesteps(self.config.get("num_inference_steps", 16))
-            for t in self.noise_scheduler.timesteps:
-                out = self.unet_session.run(["noise_pred"], {"sample": sample, "timestep": np.array([t.item()], dtype=np.int64), "global_cond": cond})[0]
-                sample = self.noise_scheduler.step(torch.from_numpy(out), t, torch.from_numpy(sample)).prev_sample.numpy()
-            
-            start = self.config["n_obs_steps"] - 1
-            chunk = sample[:, start : start + self.config["n_action_steps"]]
-            unnorm = chunk
-            if "action" in self.unnorm_stats:
-                s = self.unnorm_stats["action"]
-                if s["mode"] == "min_max": unnorm = ((chunk + 1) / 2) * (s["max"] - s["min"]) + s["min"]
-                elif s["mode"] == "mean_std": unnorm = chunk * (s["std"] + 1e-8) + s["mean"]
-            self._queues["action"].extend(unnorm[0])
-        return self._queues["action"].popleft()
-
-    def _normalize_image(self, img):
-        for k in ["observation.image", "observation.images.sync_left_arm_cam", "observation.images.sync_head_cam"]:
-            if k in self.norm_stats:
-                s = self.norm_stats[k]
-                if s["mode"] == "mean_std": img = (img - s["mean"].reshape(3,1,1)) / (s["std"].reshape(3,1,1) + 1e-8)
+        for key in possible_keys:
+            if key in self.norm_stats:
+                stats = self.norm_stats[key]
+                if stats.get("mode") == "mean_std":
+                    mean = stats["mean"].reshape(3, 1, 1)
+                    std = stats["std"].reshape(3, 1, 1)
+                    image = (image - mean) / (std + 1e-8)
                 break
-        return img
+        return image
 
-    def predict_from_ros(self, l_msg, h_msg, j_msg):
-        l = self.decode_compressed_image_msg(l_msg, False); h = self.decode_compressed_image_msg(h_msg, True)
-        return self.predict(l, h, self.extract_cartesian_state_from_joints(j_msg))
+    def _unnormalize_action(self, action: np.ndarray) -> np.ndarray:
+        """Unnormalize action."""
+        if "action" in self.unnorm_stats:
+            stats = self.unnorm_stats["action"]
+            if stats.get("mode") == "min_max":
+                # Action is in [-1, 1], scale back to original range
+                action = (action + 1) / 2  # [-1, 1] -> [0, 1]
+                min_val = stats["min"]
+                max_val = stats["max"]
+                action = action * (max_val - min_val) + min_val
+        return action
+
+    def _encode_images(self, images: np.ndarray) -> np.ndarray:
+        """
+        Encode images using ONNX RGB encoder.
+        """
+        # Convert to numpy if tensor
+        if torch.is_tensor(images):
+            images = images.cpu().numpy()
+
+        # images shape: (batch, n_cameras, C, H, W)
+        batch_size, n_cameras = images.shape[:2]
+
+        # Flatten batch and camera dims
+        # (B, N, C, H, W) -> (B*N, C, H, W)
+        images_flat = images.reshape(-1, *images.shape[2:])
+
+        # Step 1: Apply center crop using torchvision if specified
+        if self.center_crop is not None:
+            # Convert to tensor for cropping (supports batch)
+            images_tensor = torch.from_numpy(images_flat)
+            images_cropped = self.center_crop(images_tensor)
+            images_flat = images_cropped.numpy()
+
+        # Step 3: Run ONNX encoder (core neural network only)
+        features_flat = self.rgb_encoder_session.run(
+            ["features"], {"image": images_flat}
+        )[0]
+        # Output: (B*N, feature_dim)
+
+        # Step 4: Reshape back to separate batch and cameras
+        # (B*N, feature_dim) -> (B, N*feature_dim)
+        features = features_flat.reshape(batch_size, -1)
+
+        return features
+
+    def predict(self, left_image, head_image, joint_state) -> np.ndarray:
+        """
+        Run inference on preprocessed inputs.
+
+        Args:
+            left_image: Left arm camera image (H, W, 3) RGB - should be 224x178
+            head_image: Head camera image (H, W, 3) RGB - should be 224x178
+            joint_state: Joint positions (6,)
+
+        Returns:
+            Action array (6,)
+        """
+        # Preprocess images (HWC -> CHW, [0,1])
+        left_processed = self.preprocess_image(left_image)
+        head_processed = self.preprocess_image(head_image)
+
+        # Normalize images
+        left_normalized = self._normalize_image(left_processed)
+        head_normalized = self._normalize_image(head_processed)
+
+        # Map normalized images to their config keys
+        batch_images = {}
+        if "left" in self.camera_key_map:
+            batch_images[self.camera_key_map["left"]] = left_normalized
+        if "head" in self.camera_key_map:
+            batch_images[self.camera_key_map["head"]] = head_normalized
+
+        # Stack in the exact order defined by the model config
+        images_stacked = np.stack(
+            [batch_images[key] for key in self.image_features], axis=0
+        )
+
+        # Normalize joint state
+        state_normalized = self._normalize_state(joint_state)
+
+        # Populate queues
+        self._queues["observation.state"].append(state_normalized)
+        self._queues["observation.images"].append(images_stacked)
+
+        # Generate actions if queue is empty
+        if len(self._queues["action"]) == 0:
+            # Prepare observation batches from queues
+            state_list = list(self._queues["observation.state"])
+            images_list = list(self._queues["observation.images"])
+
+            # Pad with first observation if we don't have enough yet
+            while len(state_list) < self.config["n_obs_steps"]:
+                state_list.insert(0, state_list[0] if state_list else state_normalized)
+                images_list.insert(0, images_list[0] if images_list else images_stacked)
+
+            # Only keep the last n_obs_steps
+            state_list = state_list[-self.config["n_obs_steps"] :]
+            images_list = images_list[-self.config["n_obs_steps"] :]
+
+            # Create batch (1, n_obs_steps, ...)
+            state_batch = np.stack(state_list, axis=0)[np.newaxis, ...]
+            images_batch = np.stack(images_list, axis=0)[np.newaxis, ...]
+
+            # Run inference
+            action_chunk_unnorm = self._run_inference(images_batch, state_batch)
+
+            # Add to queue (now storing Absolute Unnormalized actions)
+            self._queues["action"].extend(action_chunk_unnorm[0])
+
+            # Debug saving
+            if self.debug_dir:
+                try:
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                    step_dir = (
+                        self.debug_dir / f"step_{self.debug_step:06d}_{timestamp}"
+                    )
+                    step_dir.mkdir(parents=True, exist_ok=True)
+
+                    # Save inputs
+                    cv2.imwrite(
+                        str(step_dir / "left_image.jpg"),
+                        cv2.cvtColor(left_image, cv2.COLOR_RGB2BGR),
+                    )
+                    cv2.imwrite(
+                        str(step_dir / "head_image.jpg"),
+                        cv2.cvtColor(head_image, cv2.COLOR_RGB2BGR),
+                    )
+                    np.save(str(step_dir / "joint_state.npy"), joint_state)
+
+                    # Save predicted action chunk
+                    np.save(str(step_dir / "action_chunk.npy"), action_chunk_unnorm[0])
+
+                    self.debug_step += 1
+                except Exception as e:
+                    print(f"Error saving debug data: {e}")
+
+        # Pop next action (Already Absolute & Unnormalized)
+        action = self._queues["action"].popleft()
+
+        return action
+
+    def _run_inference(self, images_batch, state_batch):
+        """
+        Core inference logic: Preprocessing -> Encoding -> Denoising -> Postprocessing.
+        Args:
+            images_batch: (B, T, N, C, H, W)
+            state_batch: (B, T, D)
+        Returns:
+            action_chunk_unnorm: (B, T_action, D_action)
+        """
+        n_obs_steps = state_batch.shape[1]
+
+        # Encode images
+        batch_size, n_obs_steps, n_cameras, C, H, W = images_batch.shape
+        images_reshaped = images_batch.reshape(
+            batch_size * n_obs_steps, n_cameras, C, H, W
+        )
+        features_reshaped = self._encode_images(images_reshaped)
+        img_features = features_reshaped.reshape(batch_size, n_obs_steps, -1)
+
+        # Prepare global conditioning
+        global_cond_unflat = np.concatenate([state_batch, img_features], axis=2)
+        global_cond = global_cond_unflat.reshape(batch_size, -1).astype(np.float32)
+
+        # Initialize noise
+        noise = np.random.randn(
+            batch_size, self.config["horizon"], self.config["action_dim"]
+        ).astype(np.float32)
+
+        # Denoising loop
+        sample = noise.copy()
+
+        # Set timesteps if not already set by external scheduler management
+        # Use configured inference steps if available, otherwise train steps
+        num_inference_steps = self.config.get(
+            "num_inference_steps", self.config["num_train_timesteps"]
+        )
+        self.noise_scheduler.set_timesteps(num_inference_steps)
+
+        for t in self.noise_scheduler.timesteps:
+            timestep = np.array([t.item()], dtype=np.int64)
+            timestep = np.repeat(timestep, batch_size)
+
+            # Run ONNX UNet
+            model_output = self.unet_session.run(
+                ["noise_pred"],
+                {"sample": sample, "timestep": timestep, "global_cond": global_cond},
+            )[0]
+
+            # Scheduler step
+            sample = self.noise_scheduler.step(
+                torch.from_numpy(model_output), t, torch.from_numpy(sample)
+            ).prev_sample.numpy()
+
+        actions = sample
+
+        # Extract action chunk
+        start = self.config["n_obs_steps"] - 1
+        end = start + self.config["n_action_steps"]
+        action_chunk = actions[:, start:end]
+
+        # Unnormalize the entire chunk immediately (Vectorized)
+        # action_chunk is (1, n_action_steps, action_dim)
+        action_chunk_unnorm = self._unnormalize_action(action_chunk)
+
+        return action_chunk_unnorm
+
+    def _warmup(self, n_steps: int = 5):
+        """Run inference with dummy inputs to warm up the engine."""
+        print(f"Running warmup for {n_steps} steps...")
+
+        # Create dummy inputs matching the expected shapes
+        # images_batch: (B, T, N, C, H, W)
+        # state_batch: (B, T, D)
+
+        batch_size = 1
+        n_obs_steps = self.config["n_obs_steps"]
+        n_cameras = 2  # Left, Head
+        C, H, W = 3, 224, 224  # Wait, target size is (224, 178) -> (178, 224)?
+        # preprocess_image does: transpose(image_normalized, (2, 0, 1)) -> (C, H, W)
+        # target_size is (224, 178) (width, height)
+        # So H=178, W=224
+        H, W = self.target_size[1], self.target_size[0]
+        state_dim = self.config["state_dim"]
+
+        dummy_images = np.random.rand(
+            batch_size, n_obs_steps, n_cameras, C, H, W
+        ).astype(np.float32)
+        dummy_state = np.random.rand(batch_size, n_obs_steps, state_dim).astype(
+            np.float32
+        )
+
+        for i in range(n_steps):
+            print(f"Warmup step {i+1}/{n_steps}...")
+            self._run_inference(dummy_images, dummy_state)
+
+    def predict_from_ros_messages(
+        self, left_compressed_msg, head_compressed_msg, joint_state_msg
+    ) -> np.ndarray:
+        """
+        Run inference from ROS messages using ONNX+TensorRT.
+
+        Returns:
+            Action array (6,) for position output
+        """
+        # Decode images
+        left_image = self.decode_compressed_image_msg(
+            left_compressed_msg, is_top_view=False
+        )
+        head_image = self.decode_compressed_image_msg(
+            head_compressed_msg, is_top_view=True
+        )
+
+        # Extract joint state
+        joint_state = self.extract_joint_positions_msg(joint_state_msg)
+
+        return self.predict(left_image, head_image, joint_state)
 
 
 class InferenceNode(Node):
-    def __init__(self, checkpoint, onnx_dir, device="cuda", freq=20.0):
-        super().__init__("lerobot_inference_onnx_cartesian")
-        self.inference = ONNXTensorRTInference(checkpoint, onnx_dir, device)
-        self.interval = 1.0 / freq
-        self.latest = {"left": None, "head": None, "joints": None}
-        self.lock = threading.Lock(); self.running = False
-        
-        sensor_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=1)
-        self.create_subscription(CompressedImage, "/sync/emily01/left_arm/color/image_raw/compressed", self.cb_left, sensor_qos)
-        self.create_subscription(CompressedImage, "/sync/emily01/head/color/image_raw/compressed", self.cb_head, sensor_qos)
-        self.create_subscription(JointState, "/sync/joint_states", self.cb_joints, sensor_qos)
-        self.pub = self.create_publisher(TwistStamped, "/la/servo_node/delta_twist_cmds", QoSProfile(reliability=ReliabilityPolicy.RELIABLE, depth=10))
-        self.get_logger().info("Inference Node Ready (2D Cartesian State -> Twist)", once=True)
+    """ROS2 node for LeRobot inference deployment with image preprocessing (ONNX+TensorRT)."""
 
-    def cb_left(self, msg):
-        with self.lock: self.latest["left"] = msg
-    def cb_head(self, msg):
-        with self.lock: self.latest["head"] = msg
-    def cb_joints(self, msg):
-        with self.lock: self.latest["joints"] = msg
+    def __init__(
+        self,
+        checkpoint_path: str,
+        onnx_dir: str,
+        device: str = "cuda",
+        inference_frequency: float = 20.0,
+        mode: str = "continuous",
+        debug: bool = False,
+    ):
+        """
+        Initialize the ROS inference node.
 
-    def start(self):
-        self.running = True; threading.Thread(target=self.loop, daemon=True).start()
-    def loop(self):
-        while self.running:
-            start = time.time()
-            with self.lock:
-                if all(self.latest[k] is not None for k in ["left", "head", "joints"]):
-                    l, h, j = self.latest["left"], self.latest["head"], self.latest["joints"]
+        Args:
+            checkpoint_path: Path to model checkpoint
+            onnx_dir: Path to ONNX models directory
+            device: Device for inference
+            inference_frequency: Continuous inference frequency (Hz)
+            mode: Inference mode - 'continuous' or 'triggered'
+        """
+        super().__init__("lerobot_inference_node_onnx")
+
+        # Configuration
+        self.mode = mode
+        self.debug = debug
+        self.inference_frequency = inference_frequency
+        self.inference_interval = 1.0 / inference_frequency
+
+        # Setup debug directory
+        self.debug_dir = None
+        self.timing_log_path = None
+        if self.debug:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.debug_dir = Path(f"debug_inference_{timestamp}")
+            self.debug_dir.mkdir(parents=True, exist_ok=True)
+            self.timing_log_path = self.debug_dir / "timing_log.txt"
+            with open(self.timing_log_path, "w") as f:
+                f.write("timestamp,metric,value_ms\n")
+            self.get_logger().info(
+                f"Debug mode enabled. Saving data to {self.debug_dir}"
+            )
+
+        # Initialize inference system
+        self.inference = ONNXTensorRTInference(
+            checkpoint_path, onnx_dir, device, debug_dir=self.debug_dir
+        )
+
+        # Run warmup
+        self.get_logger().info("Warming up inference engine...")
+        self.inference._warmup()
+        self.get_logger().info("Warmup complete.")
+
+        # Message storage (latest messages from each topic)
+        self.latest_messages = {
+            "left_image": None,
+            "head_image": None,
+            "joint_state": None,
+        }
+        self.latest_message_times = {
+            "left_image": 0.0,
+            "head_image": 0.0,
+            "joint_state": 0.0,
+        }
+        self.message_lock = threading.Lock()
+
+        # Inference control
+        self.inference_running = False
+        self.inference_thread = None
+
+        # Triggered mode variables
+        self.last_inference_time = 0.0
+        self.min_inference_interval = 1.0 / 30.0  # Max 30 Hz for triggered mode
+
+        # Setup QoS profiles
+        sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+
+        control_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+        )
+
+        # Setup subscribers based on model input mode
+        self.left_image_sub = self.create_subscription(
+            CompressedImage,
+            "/sync/emily01/left_arm/color/image_raw/compressed",
+            self.left_image_callback,
+            sensor_qos,
+        )
+
+        self.head_image_sub = self.create_subscription(
+            CompressedImage,
+            "/sync/emily01/head/color/image_raw/compressed",
+            self.head_image_callback,
+            sensor_qos,
+        )
+
+        # Only subscribe to joint states if needed by the model
+        self.joint_state_sub = None
+        if self.inference.input_mode != "vision_only":
+            self.joint_state_sub = self.create_subscription(
+                JointState, "/sync/joint_states", self.joint_state_callback, sensor_qos
+            )
+            self.get_logger().info(
+                f"Subscribed to joint states for input mode: {self.inference.input_mode}"
+            )
+        else:
+            self.get_logger().info(
+                "Running in vision_only mode - no joint state subscription"
+            )
+
+        # Setup publisher
+        self.action_pub = self.create_publisher(
+            TwistStamped, "/la/servo_node/delta_twist_cmds", control_qos
+        )
+
+        self.get_logger().info("LeRobot ONNX Inference Node ready")
+        self.get_logger().info(
+            f"Image preprocessing: Top view crop {self.inference.crop_box} + rotate, Left arm resize to {self.inference.target_size}"
+        )
+
+    def left_image_callback(self, msg: CompressedImage):
+        """Handle left arm camera messages."""
+        with self.message_lock:
+            self.latest_messages["left_image"] = msg
+            self.latest_message_times["left_image"] = time.time()
+
+        # In triggered mode, trigger inference from left camera updates
+        if self.mode == "triggered":
+            self.trigger_inference()
+
+    def head_image_callback(self, msg: CompressedImage):
+        """Handle head camera messages."""
+        with self.message_lock:
+            self.latest_messages["head_image"] = msg
+            self.latest_message_times["head_image"] = time.time()
+        # Don't trigger inference from head camera to avoid conflicts
+
+    def joint_state_callback(self, msg: JointState):
+        """Handle joint state messages."""
+        with self.message_lock:
+            self.latest_messages["joint_state"] = msg
+            self.latest_message_times["joint_state"] = time.time()
+        # Don't trigger inference from joint states to avoid conflicts
+
+    def trigger_inference(self):
+        """Trigger inference with rate limiting (for triggered mode)."""
+        current_time = time.time()
+
+        # Rate limiting to prevent excessive inference
+        if current_time - self.last_inference_time < self.min_inference_interval:
+            return
+
+        # Get latest messages
+        with self.message_lock:
+            # Check for required messages based on model input mode
+            required_messages = ["left_image", "head_image"]
+            if self.inference.input_mode != "vision_only":
+                required_messages.append("joint_state")
+
+            # Wait until we have all required messages
+            if any(
+                self.latest_messages[msg_type] is None for msg_type in required_messages
+            ):
+                return
+
+            # Copy messages for processing
+            left_msg = self.latest_messages["left_image"]
+            head_msg = self.latest_messages["head_image"]
+            joint_msg = (
+                self.latest_messages["joint_state"]
+                if self.inference.input_mode != "vision_only"
+                else None
+            )
+
+        # Run inference in separate thread to avoid blocking callbacks
+        if not self.inference_running:
+            threading.Thread(
+                target=self.run_inference_threaded,
+                args=(left_msg, head_msg, joint_msg),
+                daemon=True,
+            ).start()
+
+    def start_inference_loop(self):
+        """Start the continuous inference loop (for continuous mode only)."""
+        if self.mode != "continuous":
+            self.get_logger().warn("Inference loop only available in continuous mode")
+            return
+
+        if self.inference_thread is not None and self.inference_thread.is_alive():
+            self.get_logger().warn("Inference loop already running")
+            return
+
+        self.inference_running = True
+        self.inference_thread = threading.Thread(
+            target=self.continuous_inference_loop, daemon=True
+        )
+        self.inference_thread.start()
+        self.get_logger().info(
+            f"Started continuous inference loop at {self.inference_frequency} Hz"
+        )
+
+    def stop_inference_loop(self):
+        """Stop the continuous inference loop."""
+        self.inference_running = False
+        if self.inference_thread is not None:
+            self.inference_thread.join(timeout=2.0)
+        self.get_logger().info("Stopped continuous inference loop")
+
+    def continuous_inference_loop(self):
+        """Continuous inference loop that runs at specified frequency."""
+        # Wait 1 second before starting as requested
+        self.get_logger().info("Waiting 1 second before starting inference loop...")
+        time.sleep(1.0)
+
+        self.get_logger().info(
+            f"Starting continuous inference at {self.inference_frequency} Hz"
+        )
+
+        while self.inference_running:
+            loop_start_time = time.time()
+
+            try:
+                # Get latest messages
+                with self.message_lock:
+                    # Check for required messages based on model input mode
+                    required_messages = ["left_image", "head_image"]
+                    if self.inference.input_mode != "vision_only":
+                        required_messages.append("joint_state")
+
+                    # Check if all required messages are available
+                    if all(
+                        self.latest_messages[msg_type] is not None
+                        for msg_type in required_messages
+                    ):
+                        # Copy messages for processing
+                        left_msg = self.latest_messages["left_image"]
+                        head_msg = self.latest_messages["head_image"]
+                        joint_msg = (
+                            self.latest_messages["joint_state"]
+                            if self.inference.input_mode != "vision_only"
+                            else None
+                        )
+
+                        # Run inference
+                        if self.debug:
+                            # Calculate latency: now - min(message_times)
+                            # Only consider times for required messages
+                            msg_times = [
+                                self.latest_message_times["left_image"],
+                                self.latest_message_times["head_image"],
+                            ]
+                            if self.inference.input_mode != "vision_only":
+                                msg_times.append(
+                                    self.latest_message_times["joint_state"]
+                                )
+
+                            latency = time.time() - min(msg_times)
+                            latency_ms = latency * 1000
+                            self.get_logger().info(
+                                f"[DEBUG] Message Latency (Receive -> Inference Start): {latency_ms:.2f} ms"
+                            )
+
+                            # Log to file
+                            if self.timing_log_path:
+                                try:
+                                    with open(self.timing_log_path, "a") as f:
+                                        timestamp = datetime.datetime.now().strftime(
+                                            "%Y-%m-%d %H:%M:%S.%f"
+                                        )
+                                        f.write(
+                                            f"{timestamp},message_latency_ms,{latency_ms:.4f}\n"
+                                        )
+                                except Exception as e:
+                                    self.get_logger().error(
+                                        f"Failed to write to timing log: {e}"
+                                    )
+
+                        self.run_inference_synchronous(left_msg, head_msg, joint_msg)
+                    else:
+                        missing_msgs = [
+                            msg_type
+                            for msg_type in required_messages
+                            if self.latest_messages[msg_type] is None
+                        ]
+                        self.get_logger().debug(f"Waiting for messages: {missing_msgs}")
+
+            except Exception as e:
+                self.get_logger().error(f"Inference loop error: {e}")
+
+            # Sleep to maintain frequency
+            elapsed_time = time.time() - loop_start_time
+            sleep_time = max(0, self.inference_interval - elapsed_time)
+
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            else:
+                self.get_logger().warn(
+                    f"Inference loop running slower than {self.inference_frequency} Hz"
+                )
+
+    def run_inference_threaded(
+        self,
+        left_msg: CompressedImage,
+        head_msg: CompressedImage,
+        joint_msg: Optional[JointState],
+    ):
+        """Run inference in a separate thread (for triggered mode)."""
+        self.inference_running = True
+
+        try:
+            # Process ROS messages and run inference
+            action = self.inference.predict_from_ros_messages(
+                left_msg, head_msg, joint_msg
+            )
+
+            # Publish action as JointTrajectory
+            self.publish_action(action)
+
+        except Exception as e:
+            self.get_logger().error(f"Triggered inference failed: {e}")
+
+        finally:
+            self.last_inference_time = time.time()
+            self.inference_running = False
+
+    def run_inference_synchronous(
+        self,
+        left_msg: CompressedImage,
+        head_msg: CompressedImage,
+        joint_msg: Optional[JointState],
+    ):
+        """Run inference synchronously with the provided messages."""
+        try:
+            # Process ROS messages and run inference
+            if self.debug:
+                start_time = time.perf_counter()
+
+            action = self.inference.predict_from_ros_messages(
+                left_msg, head_msg, joint_msg
+            )
+
+            if self.debug:
+                inference_time = time.perf_counter() - start_time
+                inference_time_ms = inference_time * 1000
+                self.get_logger().info(
+                    f"[DEBUG] Inference Time (Predict -> Publish): {inference_time_ms:.2f} ms"
+                )
+
+                # Log to file
+                if self.timing_log_path:
                     try:
-                        act = self.inference.predict_from_ros(l, h, j)
-                        msg = TwistStamped(); msg.header.stamp = self.get_clock().now().to_msg(); msg.header.frame_id = "base_link"
-                        msg.twist.linear.x = float(-act[0]); msg.twist.linear.y = float(-act[1])
-                        self.pub.publish(msg)
-                    except Exception as e: self.get_logger().error(f"Inference failed: {e}")
-            while time.time() - start < self.interval: time.sleep(0.001)
+                        with open(self.timing_log_path, "a") as f:
+                            timestamp = datetime.datetime.now().strftime(
+                                "%Y-%m-%d %H:%M:%S.%f"
+                            )
+                            f.write(
+                                f"{timestamp},inference_time_ms,{inference_time_ms:.4f}\n"
+                            )
+                    except Exception as e:
+                        self.get_logger().error(f"Failed to write to timing log: {e}")
+
+            # Publish action as JointTrajectory
+            self.publish_action(action)
+
+        except Exception as e:
+            self.get_logger().error(f"Inference failed: {e}")
+
+    def publish_action(self, action: np.ndarray):
+        """Publish action as TwistStamped message (Cartesian velocity command)."""
+        if action is None:
+            return
+
+        # Expect 2D action: [x, y] cartesian velocities
+        if len(action) != 2:
+            raise ValueError(
+                f"Expected 2D action for Cartesian control, got {len(action)}D"
+            )
+
+        twist_msg = TwistStamped()
+        twist_msg.header = Header()
+        twist_msg.header.stamp = self.get_clock().now().to_msg()
+        twist_msg.header.frame_id = "la_base_link"
+
+        # Set linear velocities from action
+        twist_msg.twist.linear.x = float(-action[0])
+        twist_msg.twist.linear.y = float(-action[1])
+        twist_msg.twist.linear.z = 0.0
+
+        # Zero angular velocities
+        twist_msg.twist.angular.x = 0.0
+        twist_msg.twist.angular.y = 0.0
+        twist_msg.twist.angular.z = 0.0
+
+        self.get_logger().debug(
+            f"Cartesian velocity command - linear.x: {action[0]:.4f}, linear.y: {action[1]:.4f}"
+        )
+
+        self.action_pub.publish(twist_msg)
+
 
 def main():
-    parser = argparse.ArgumentParser(); parser.add_argument("--checkpoint", required=True); parser.add_argument("--onnx-dir", required=True)
-    parser.add_argument("--device", default="cuda"); parser.add_argument("--frequency", type=float, default=20.0)
-    args = parser.parse_args(); rclpy.init()
-    node = InferenceNode(args.checkpoint, args.onnx_dir, args.device, args.frequency)
-    node.start(); rclpy.spin(node); rclpy.shutdown()
+    """Main entry point for the ROS node."""
 
-if __name__ == "__main__": main()
+    parser = argparse.ArgumentParser(
+        description="LeRobot ROS2 Inference Node - Approach Plate (ONNX+TensorRT)"
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        required=True,
+        help="Path to model checkpoint directory (for normalization stats)",
+    )
+    parser.add_argument(
+        "--onnx-dir", type=str, required=True, help="Path to ONNX models directory"
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        choices=["cuda", "cpu"],
+        help="Device for inference",
+    )
+    parser.add_argument(
+        "--frequency",
+        type=float,
+        default=20.0,
+        help="Continuous inference frequency (Hz) - used in continuous mode",
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="continuous",
+        choices=["continuous", "triggered"],
+        help="Inference mode: continuous (fixed frequency) or triggered (by topic updates)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode to log timing and save inference data",
+    )
+
+    # Parse known args to allow ROS args
+    parsed_args, unknown = parser.parse_known_args()
+
+    # Initialize ROS
+    rclpy.init(args=unknown)
+
+    try:
+        # Create and run the node
+        node = InferenceNode(
+            checkpoint_path=parsed_args.checkpoint,
+            onnx_dir=parsed_args.onnx_dir,
+            device=parsed_args.device,
+            inference_frequency=parsed_args.frequency,
+            mode=parsed_args.mode,
+            debug=parsed_args.debug,
+        )
+
+        print("LeRobot ONNX Inference Node started (Approach Plate - Absolute)")
+        print("Subscribing to:")
+        print("  - /sync/emily01/left_arm/color/image_raw/compressed")
+        print("  - /sync/emily01/head/color/image_raw/compressed")
+        if node.inference.input_mode != "vision_only":
+            print("  - /sync/joint_states")
+        print("Publishing to:")
+        print("  - /la/servo_node/delta_twist_cmds (TwistStamped)")
+        print(f"Inference mode: {parsed_args.mode}")
+        print(
+            f"Model modes - Input: {node.inference.input_mode}, Output: {node.inference.output_mode}"
+        )
+        print(f"Image preprocessing:")
+        print(
+            f"  - Top view: Crop {node.inference.crop_box} → Rotate 90° CW → {node.inference.target_size}"
+        )
+        print(f"  - Left arm: Resize to {node.inference.target_size}")
+
+        if parsed_args.mode == "continuous":
+            print(f"Inference frequency: {parsed_args.frequency} Hz")
+            # Start the continuous inference loop
+            node.start_inference_loop()
+        else:
+            print("Inference triggered by left camera topic updates (max 30 Hz)")
+
+        print("Press Ctrl+C to stop")
+
+        # Spin the node
+        rclpy.spin(node)
+
+    except KeyboardInterrupt:
+        print("Stopping node...")
+    except Exception as e:
+        print(f"Node error: {e}")
+        import traceback
+
+        traceback.print_exc()
+    finally:
+        # Cleanup
+        if "node" in locals():
+            node.stop_inference_loop()
+            node.destroy_node()
+
+        rclpy.shutdown()
+        print("Node stopped")
+
+
+if __name__ == "__main__":
+    main()
