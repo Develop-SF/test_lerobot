@@ -7,8 +7,7 @@ This node subscribes to sensor topics, runs inference using ONNX Runtime with Te
 and publishes actions.
 
 Includes image preprocessing matching the training pipeline:
-- Top view (head camera): Crop (260, 135, 178, 224) → Rotate 90° CW → 224×178
-- Left arm camera: Resize to 224×178
+- All cameras: Resize to 320×180 (no cropping or rotation for 7DoF model)
 """
 
 import sys
@@ -113,8 +112,7 @@ class ONNXTensorRTInference:
         }
         
         print(f"\nImage preprocessing:")
-        print(f"  - Head camera: Crop {self.crop_box} → Rotate 90° CW → {self.target_size}")
-        print(f"  - Front camera: Resize to {self.target_size}")
+        print(f"  - All cameras: Resize to {self.target_size}")
         
         # Metadata for ROS node
         self.input_mode = "vision_pos" # Assuming vision + position based on model structure
@@ -299,7 +297,7 @@ class ONNXTensorRTInference:
         print(f"  Unnormalization stats keys: {list(self.unnorm_stats.keys())}")
     
     def decode_compressed_image_msg(self, compressed_msg, is_top_view: bool = False) -> np.ndarray:
-        """Decode ROS CompressedImage message to RGB array with preprocessing."""
+        """Decode ROS CompressedImage message to RGB array and resize to model input size."""
         np_arr = np.frombuffer(compressed_msg.data, np.uint8)
         image_bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
         
@@ -308,18 +306,8 @@ class ONNXTensorRTInference:
         
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         
-        # For 7DOF, just resize to target size (no crop, no rotate)
-        if self.crop_box is not None:
-            # Legacy path with crop and rotate (not used for 7DOF)
-            if is_top_view:
-                x, y, w, h = self.crop_box
-                image_cropped = image_rgb[y:y+h, x:x+w]
-                image_processed = cv2.rotate(image_cropped, cv2.ROTATE_90_CLOCKWISE)
-            else:
-                image_processed = cv2.resize(image_rgb, self.target_size, interpolation=cv2.INTER_AREA)
-        else:
-            # 7DOF: Simply resize to target size
-            image_processed = cv2.resize(image_rgb, self.target_size, interpolation=cv2.INTER_AREA)
+        # 7DOF model: simply resize to target size (no cropping or rotation)
+        image_processed = cv2.resize(image_rgb, self.target_size, interpolation=cv2.INTER_AREA)
         
         return image_processed
     
@@ -551,6 +539,8 @@ class ONNXTensorRTInference:
         Returns:
             action_chunk_unnorm: (B, T_action, D_action)
         """
+        inference_start = time.time()
+        
         n_obs_steps = state_batch.shape[1]
         
         # Encode images
@@ -609,6 +599,10 @@ class ONNXTensorRTInference:
         # Unnormalize the entire chunk immediately (Vectorized)
         # action_chunk is (1, n_action_steps, action_dim)
         action_chunk_unnorm = self._unnormalize_action(action_chunk)
+        
+        # Record inference time
+        inference_time = time.time() - inference_start
+        print(f"  Inference time: {inference_time:.4f}s")
         
         return action_chunk_unnorm
 
@@ -753,7 +747,7 @@ class InferenceNode(Node):
         if self.inference.input_mode != "vision_only":
             self.joint_state_sub = self.create_subscription(
                 JointState,
-                '/sync/joint_states',
+                '/sync/isaac_joint_states',
                 self.joint_state_callback,
                 sensor_qos
             )
@@ -764,7 +758,7 @@ class InferenceNode(Node):
         # Setup publisher - 7DOF uses right arm
         self.action_pub = self.create_publisher(
             JointTrajectory,
-            '/right_arm/joint_trajectory',
+            '/ra_trajectory_controller/joint_trajectory',
             control_qos
         )
         

@@ -778,7 +778,7 @@ def main():
     parser.add_argument("--action-topics", nargs="+",
                        default=[
                            "/sync/ra_trajectory_controller/joint_trajectory",
-                           "/sync/sns_right_gripper_cmd"
+                           "/sync/right_gripper_cmd"
                        ],
                        help="ROS topics for action commands (arm trajectory + gripper command)")
     

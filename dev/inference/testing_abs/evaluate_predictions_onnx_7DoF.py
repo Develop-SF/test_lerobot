@@ -130,8 +130,7 @@ class ONNXTensorRTInference:
         }
         
         print(f"\nImage preprocessing:")
-        print(f"  - Head camera: Crop {self.crop_box} → Rotate 90° CW → {self.target_size}")
-        print(f"  - Left arm camera: Resize to {self.target_size}")
+        print(f"  - All cameras: Resize to {self.target_size}")
     
     def reset(self):
         """Clear observation and action queues."""
@@ -312,7 +311,7 @@ class ONNXTensorRTInference:
         print(f"  Unnormalization stats keys: {list(self.unnorm_stats.keys())}")
     
     def decode_compressed_image_msg(self, compressed_msg, is_top_view: bool = False) -> np.ndarray:
-        """Decode ROS CompressedImage message to RGB array with preprocessing."""
+        """Decode ROS CompressedImage message to RGB array and resize to model input size."""
         np_arr = np.frombuffer(compressed_msg.data, np.uint8)
         image_bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
         
@@ -321,18 +320,8 @@ class ONNXTensorRTInference:
         
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         
-        # For 7DOF, just resize to target size (no crop, no rotate)
-        if self.crop_box is not None:
-            # Legacy path with crop and rotate
-            if is_top_view:
-                x, y, w, h = self.crop_box
-                image_cropped = image_rgb[y:y+h, x:x+w]
-                image_processed = cv2.rotate(image_cropped, cv2.ROTATE_90_CLOCKWISE)
-            else:
-                image_processed = cv2.resize(image_rgb, self.target_size, interpolation=cv2.INTER_AREA)
-        else:
-            # 7DOF: Simply resize to target size
-            image_processed = cv2.resize(image_rgb, self.target_size, interpolation=cv2.INTER_AREA)
+        # 7DOF model: simply resize to target size (no cropping or rotation)
+        image_processed = cv2.resize(image_rgb, self.target_size, interpolation=cv2.INTER_AREA)
         
         return image_processed
     
