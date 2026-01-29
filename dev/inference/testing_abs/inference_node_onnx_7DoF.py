@@ -758,7 +758,7 @@ class InferenceNode(Node):
         # Setup publisher - 7DOF uses right arm
         self.action_pub = self.create_publisher(
             JointTrajectory,
-            '/ra_trajectory_controller/joint_trajectory',
+            '/right_arm/joint_trajectory',
             control_qos
         )
         

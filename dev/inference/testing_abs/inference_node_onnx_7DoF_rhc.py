@@ -129,6 +129,10 @@ class ONNXTensorRTInference:
         self.inference_times = deque(maxlen=10)  # Rolling window of inference durations
         self.starvation_count = 0  # Track consecutive queue starvations
         
+        # Temporal compensation for async inference
+        self.control_step_counter = 0  # Total control steps executed
+        self.inference_start_step = 0  # Step when inference was triggered
+        
         print(f"\nImage preprocessing:")
         print(f"  - All cameras: Resize to {self.target_size}")
         print(f"\nAsync inference configuration:")
@@ -148,6 +152,8 @@ class ONNXTensorRTInference:
         with self.inference_lock:
             self.pending_chunk = None
         self.starvation_count = 0
+        self.control_step_counter = 0
+        self.inference_start_step = 0
 
     def _setup_onnx_sessions(self):
         """Setup ONNX Runtime sessions with TensorRT provider."""
@@ -516,6 +522,9 @@ class ONNXTensorRTInference:
         Returns:
             Action array (7,) - 6 arm joints + gripper
         """
+        # Increment control step counter for temporal tracking
+        self.control_step_counter += 1
+        
         # Preprocess images (HWC -> CHW, [0,1])
         front_processed = self.preprocess_image(front_image)
         head_processed = self.preprocess_image(head_image)
@@ -558,6 +567,9 @@ class ONNXTensorRTInference:
         )
         
         if should_start_inference:
+            # Record the step when inference starts (for temporal compensation)
+            self.inference_start_step = self.control_step_counter
+            
             # Prepare observation batches from queues
             state_list = list(self._queues["observation.state"])
             images_list = list(self._queues["observation.images"])
@@ -579,7 +591,7 @@ class ONNXTensorRTInference:
             self._start_background_inference(images_batch, state_batch)
             
             if self.debug_dir:
-                print(f"[Async] Triggered inference at queue_size={queue_size}/{self.config['n_action_steps']} (threshold={self.replan_trigger_size})")
+                print(f"[Async] Triggered inference at step={self.control_step_counter}, queue_size={queue_size}/{self.config['n_action_steps']} (threshold={self.replan_trigger_size})")
         
         # Handle queue starvation
         if queue_size == 0:
@@ -724,7 +736,7 @@ class ONNXTensorRTInference:
         self.inference_thread.start()
     
     def _merge_action_chunks(self):
-        """Merge pending chunk with current action queue using weighted average."""
+        """Merge pending chunk with current action queue using temporal compensation."""
         with self.inference_lock:
             if self.pending_chunk is None:
                 return
@@ -732,33 +744,68 @@ class ONNXTensorRTInference:
             new_actions = self.pending_chunk['actions'][0]  # (n_action_steps, action_dim)
             inference_duration = self.pending_chunk['duration']
             
-            # Calculate how many actions remain in queue
+            # Calculate temporal offset: how many control steps elapsed since inference started
+            steps_since_inference_start = self.control_step_counter - self.inference_start_step
+            
+            # Temporal offset is clamped to valid range [0, n_action_steps]
+            # This represents how many predictions are now "in the past"
+            temporal_offset = min(max(0, steps_since_inference_start), len(new_actions))
+            
+            # Skip stale predictions (those corresponding to already-executed timesteps)
+            new_actions_aligned = new_actions[temporal_offset:]
+            
+            # Get remaining old actions
             old_actions = np.array(list(self._queues["action"]), dtype=np.float32)  # (remaining, action_dim)
             
-            # Aggregate overlapping region
-            if len(old_actions) > 0:
-                aggregated_overlap = self._aggregate_actions(old_actions, new_actions, self.aggregate_fn_name)
-                # Determine non-overlapping portion from new chunk
-                non_overlap_start = len(old_actions)
-                fresh_actions = new_actions[non_overlap_start:]
-                # Combine: aggregated overlap + fresh actions
-                merged_actions = np.vstack([aggregated_overlap, fresh_actions])
+            # Merge logic with temporal alignment
+            if len(old_actions) > 0 and len(new_actions_aligned) > 0:
+                # Calculate overlap: how many actions to blend
+                overlap_len = min(len(old_actions), len(new_actions_aligned))
+                
+                # Blend overlapping portion
+                aggregated_overlap = self._aggregate_actions(
+                    old_actions[:overlap_len],
+                    new_actions_aligned[:overlap_len],
+                    self.aggregate_fn_name
+                )
+                
+                # Get fresh (non-overlapping) actions from new prediction
+                fresh_actions = new_actions_aligned[overlap_len:]
+                
+                # Combine: blended overlap + fresh actions
+                if len(fresh_actions) > 0:
+                    merged_actions = np.vstack([aggregated_overlap, fresh_actions])
+                else:
+                    merged_actions = aggregated_overlap
+                    
+            elif len(new_actions_aligned) > 0:
+                # No old actions, just use aligned new actions
+                merged_actions = new_actions_aligned
+            elif len(old_actions) > 0:
+                # No new aligned actions (all stale), keep old actions
+                merged_actions = old_actions
+                print(f"[WARNING] All {len(new_actions)} new predictions are stale (offset={temporal_offset}), keeping {len(old_actions)} old actions")
             else:
-                # No overlap, use all new actions
-                merged_actions = new_actions
+                # Both empty - this shouldn't happen but handle gracefully
+                print(f"[ERROR] Both old and new action queues are empty after temporal alignment!")
+                merged_actions = np.array([]).reshape(0, self.config['action_dim'])
             
             # Replace queue contents
             self._queues["action"].clear()
             for action in merged_actions:
                 self._queues["action"].append(action)
             
-            # Debug logging
-            if self.debug_dir:
-                overlap_len = len(old_actions)
+            # Detailed debug logging
+            if self.debug_dir or temporal_offset > 0:
                 avg_inference_steps = inference_duration / self.control_dt
+                inference_latency_ms = inference_duration * 1000
+                
                 debug_msg = (
-                    f"[Async Merge] Queue: {len(old_actions)}→{len(merged_actions)} | "
-                    f"Overlap: {overlap_len} | Inference: {inference_duration*1000:.1f}ms ({avg_inference_steps:.1f} steps) | "
+                    f"[Async Merge] Step={self.control_step_counter} | "
+                    f"Temporal offset: {temporal_offset} steps ({temporal_offset*self.control_dt*1000:.0f}ms) | "
+                    f"Queue: {len(old_actions)}→{len(merged_actions)} | "
+                    f"Skipped: {temporal_offset}/{len(new_actions)} stale | "
+                    f"Inference: {inference_latency_ms:.1f}ms ({avg_inference_steps:.1f} steps) | "
                     f"Method: {self.aggregate_fn_name}"
                 )
                 print(debug_msg)
@@ -834,8 +881,9 @@ class InferenceNode(Node):
         super().__init__('lerobot_inference_node_onnx')
         
         # Configuration
+        self.declare_parameter('debug', debug)
+        self.debug = self.get_parameter('debug').get_parameter_value().bool_value
         self.mode = mode
-        self.debug = debug
         self.inference_frequency = inference_frequency
         self.inference_interval = 1.0 / inference_frequency
         
@@ -937,7 +985,7 @@ class InferenceNode(Node):
         # Setup publisher - 7DOF uses right arm
         self.action_pub = self.create_publisher(
             JointTrajectory,
-            '/ra_trajectory_controller/joint_trajectory',
+            '/right_arm/joint_trajectory',
             control_qos
         )
         
@@ -947,6 +995,15 @@ class InferenceNode(Node):
             '/right_gripper_cmd',
             control_qos
         )
+        
+        # Setup raw gripper publisher for comparison when debugging
+        self.gripper_raw_pub = None
+        if self.debug:
+            self.gripper_raw_pub = self.create_publisher(
+                GripperCommand,
+                '/right_gripper_cmd/raw',
+                control_qos
+            )
         
         self.get_logger().info("LeRobot ONNX Inference Node ready (7DOF)")
         self.get_logger().info(f"Image preprocessing: No crop, simple resize to {self.inference.target_size}")
@@ -1191,6 +1248,14 @@ class InferenceNode(Node):
         gripper_msg.position = gripper_value
         gripper_msg.max_effort = 100.0  # Default max effort
         self.gripper_pub.publish(gripper_msg)
+        
+        # Publish raw gripper value for comparison if debug is enabled
+        if self.debug and self.gripper_raw_pub is not None:
+            raw_gripper_msg = GripperCommand()
+            raw_gripper_msg.position = raw_gripper_value
+            raw_gripper_msg.max_effort = 100.0
+            self.gripper_raw_pub.publish(raw_gripper_msg)
+            
         self.get_logger().debug(f"Published gripper command: {gripper_value:.4f}")
         
         # Prepare arm trajectory (6 joints, removing gripper at index 5)
