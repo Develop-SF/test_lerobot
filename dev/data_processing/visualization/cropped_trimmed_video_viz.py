@@ -114,6 +114,7 @@ class CroppedTrimmedVideoVisualizer:
             if self.crop_box:
                 x, y, w, h = self.crop_box
                 image = image[y:y+h, x:x+w]
+                print(f"📏 Image size after crop: {image.shape[1]}x{image.shape[0]} (width x height)")
             
             # Keep in BGR for OpenCV video writing
             return image
