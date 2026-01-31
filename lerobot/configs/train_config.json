@@ -1,0 +1,133 @@
+{
+    "dataset": {
+        "repo_id": "/mnt/nas/dataset/robot_learning/lerobot/_",
+        "episodes": null,
+        "image_transforms": {
+            "enable": false,
+            "max_num_transforms": 1,
+            "random_order": false
+        },
+        "use_imagenet_stats": true,
+        "video_backend": "torchcodec"
+    },
+    "policy": {
+        "type": "diffusion",
+        "repo_id": "_",
+        "n_obs_steps": 2,
+        "device": "cuda",
+        "use_amp": false,
+        "normalization_mapping": {
+            "VISUAL": "MEAN_STD",
+            "STATE": "MIN_MAX",
+            "ACTION": "MIN_MAX"
+        },
+        "input_features": {
+            "observation.images.head_cam": {
+                "type": "VISUAL",
+                "shape": [
+                    3,
+                    178,
+                    224
+                ]
+            },
+            "observation.images.left_arm_cam": {
+                "type": "VISUAL",
+                "shape": [
+                    3,
+                    178,
+                    224
+                ]
+            },
+            "observation.state": {
+                "type": "STATE",
+                "shape": [
+                    6
+                ]
+            }
+        },
+        "output_features": {
+            "action": {
+                "type": "ACTION",
+                "shape": [
+                    6
+                ]
+            }
+        },
+        "horizon": 32,
+        "n_action_steps": 16,
+        "drop_n_last_frames": 7,
+        "vision_backbone": "resnet18",
+        "crop_shape": [
+            153,
+            200
+        ],
+        "crop_is_random": false,
+        "pretrained_backbone_weights": null,
+        "use_group_norm": true,
+        "spatial_softmax_num_keypoints": 32,
+        "use_separate_rgb_encoder_per_camera": false,
+        "down_dims": [
+            512,
+            1024,
+            2048
+        ],
+        "kernel_size": 5,
+        "n_groups": 8,
+        "diffusion_step_embed_dim": 128,
+        "use_film_scale_modulation": true,
+        "noise_scheduler_type": "DDPM",
+        "num_train_timesteps": 100,
+        "beta_schedule": "squaredcos_cap_v2",
+        "beta_start": 0.0001,
+        "beta_end": 0.02,
+        "prediction_type": "epsilon",
+        "clip_sample": true,
+        "clip_sample_range": 1.0,
+        "num_inference_steps": null,
+        "do_mask_loss_for_padding": false,
+        "optimizer_lr": 0.0001,
+        "optimizer_betas": [
+            0.95,
+            0.999
+        ],
+        "optimizer_eps": 1e-08,
+        "optimizer_weight_decay": 1e-06,
+        "scheduler_name": "cosine",
+        "scheduler_warmup_steps": 500,
+        "push_to_hub": false
+    },
+    "job_name": "_",
+    "resume": false,
+    "seed": 100000,
+    "num_workers": 16,
+    "batch_size": 128,
+    "steps": 100000,
+    "eval_freq": 100,
+    "log_freq": 100,
+    "save_checkpoint": true,
+    "save_freq": 10000,
+    "use_policy_training_preset": true,
+    "optimizer": {
+        "type": "adam",
+        "lr": 0.0001,
+        "betas": [
+            0.95,
+            0.999
+        ],
+        "eps": 1e-08,
+        "weight_decay": 1e-06,
+        "grad_clip_norm": 10.0
+    },
+    "scheduler": {
+        "type": "diffuser",
+        "num_warmup_steps": 250,
+        "name": "cosine"
+    },
+    "wandb": {
+        "enable": true,
+        "disable_artifact": true,
+        "project": "_",
+        "entity": null,
+        "notes": null
+    }
+}
