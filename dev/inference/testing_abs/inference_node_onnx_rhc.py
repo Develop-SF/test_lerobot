@@ -16,33 +16,32 @@ Includes image preprocessing matching the training pipeline:
 - Left arm camera: Resize to 224×178
 """
 
-import sys
-import time
-import threading
-from threading import Lock, Thread
 import argparse
-import json
 import datetime
+import json
 import os
+import sys
+import threading
+import time
 import traceback
-from pathlib import Path
-from typing import Dict, Optional, List, Tuple
 from collections import deque
+from pathlib import Path
+from threading import Lock, Thread
+from typing import Dict, List, Optional, Tuple
 
-import numpy as np
 import cv2
-import torch
-import torchvision
+import numpy as np
 import onnxruntime as ort
-from diffusers.schedulers.scheduling_ddim import DDIMScheduler
-
 # ROS2 imports
 import rclpy
+import torch
+import torchvision
+from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CompressedImage, JointState
-from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from std_msgs.msg import Header
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 
 class ONNXTensorRTInference:
@@ -50,7 +49,7 @@ class ONNXTensorRTInference:
     
     def __init__(self, checkpoint_path: str, onnx_dir: str, device: str = "cuda", debug_dir: Optional[Path] = None,
                  chunk_size_threshold: float = 0.5, aggregate_fn_name: str = "weighted_average",
-                 aggregate_weight_decay: float = 0.01, control_frequency: float = 20.0):
+                 aggregate_weight_decay: float = 0.01, control_frequency: float = 20.0, skip_first_n_actions: int = 0):
         """
         Initialize the ONNX+TensorRT inference system.
         
@@ -58,6 +57,7 @@ class ONNXTensorRTInference:
             checkpoint_path: Path to original model checkpoint (for normalization stats)
             onnx_dir: Path to ONNX models directory
             device: Device for inference ("cuda" or "cpu")
+            skip_first_n_actions: Number of first actions to skip from new_actions chunk (default: 0)
         """
         self.device = device
         self.checkpoint_path = Path(checkpoint_path)
@@ -71,6 +71,7 @@ class ONNXTensorRTInference:
         self.aggregate_weight_decay = aggregate_weight_decay
         self.control_frequency = control_frequency
         self.control_dt = 1.0 / control_frequency
+        self.skip_first_n_actions = skip_first_n_actions
         
         # Load ONNX configuration
         config_path = self.onnx_dir / "onnx_config.json"
@@ -139,6 +140,7 @@ class ONNXTensorRTInference:
         print(f"\nAsync inference configuration:")
         print(f"  - Chunk size threshold: {self.chunk_size_threshold} ({self.replan_trigger_size}/{self.config['n_action_steps']} actions)")
         print(f"  - Aggregation function: {self.aggregate_fn_name}")
+        print(f"  - Skip first N actions: {self.skip_first_n_actions}")
         print(f"  - Control frequency: {self.control_frequency} Hz (dt={self.control_dt:.4f}s)")
         
         # Metadata for ROS node
@@ -252,8 +254,9 @@ class ONNXTensorRTInference:
     
     def _setup_normalization(self):
         """Setup normalization from policy's normalize_inputs/normalize_targets."""
-        from lerobot.common.policies.diffusion.modeling_diffusion import DiffusionPolicy
-        
+        from lerobot.common.policies.diffusion.modeling_diffusion import \
+            DiffusionPolicy
+
         # Resolve checkpoint path
         if not (self.checkpoint_path / "pretrained_model").exists():
             checkpoint_path = self.checkpoint_path / "output" / "checkpoints" / "last"
@@ -714,6 +717,10 @@ class ONNXTensorRTInference:
             new_actions = self.pending_chunk['actions'][0]  # (n_action_steps, action_dim)
             inference_duration = self.pending_chunk['duration']
             
+            # Skip first N actions if configured
+            if self.skip_first_n_actions > 0:
+                new_actions = new_actions[self.skip_first_n_actions:]
+            
             # Calculate how many actions remain in queue
             old_actions = np.array(list(self._queues["action"]), dtype=np.float32)  # (remaining, action_dim)
             
@@ -738,10 +745,11 @@ class ONNXTensorRTInference:
             if self.debug_dir:
                 overlap_len = len(old_actions)
                 avg_inference_steps = inference_duration / self.control_dt
+                skip_info = f" | Skipped: {self.skip_first_n_actions}" if self.skip_first_n_actions > 0 else ""
                 debug_msg = (
                     f"[Async Merge] Queue: {len(old_actions)}→{len(merged_actions)} | "
                     f"Overlap: {overlap_len} | Inference: {inference_duration*1000:.1f}ms ({avg_inference_steps:.1f} steps) | "
-                    f"Method: {self.aggregate_fn_name}"
+                    f"Method: {self.aggregate_fn_name}{skip_info}"
                 )
                 print(debug_msg)
             
@@ -798,7 +806,8 @@ class InferenceNode(Node):
     
     def __init__(self, checkpoint_path: str, onnx_dir: str, device: str = "cuda", inference_frequency: float = 20.0, 
                  mode: str = "continuous", debug: bool = False, chunk_size_threshold: float = 0.5,
-                 aggregate_fn_name: str = "weighted_average", aggregate_weight_decay: float = 0.01):
+                 aggregate_fn_name: str = "weighted_average", aggregate_weight_decay: float = 0.01,
+                 skip_first_n_actions: int = 0):
         """
         Initialize the ROS inference node.
         
@@ -811,6 +820,7 @@ class InferenceNode(Node):
             chunk_size_threshold: Fraction of action queue empty before replanning (0.5 = 50%)
             aggregate_fn_name: Method for aggregating overlapping actions
             aggregate_weight_decay: Decay rate for weighted average aggregation
+            skip_first_n_actions: Number of first actions to skip from new_actions chunk
         """
         super().__init__('lerobot_inference_node_onnx')
         
@@ -839,7 +849,8 @@ class InferenceNode(Node):
             chunk_size_threshold=chunk_size_threshold,
             aggregate_fn_name=aggregate_fn_name,
             aggregate_weight_decay=aggregate_weight_decay,
-            control_frequency=inference_frequency
+            control_frequency=inference_frequency,
+            skip_first_n_actions=skip_first_n_actions
         )
         
         # Run warmup
@@ -1219,6 +1230,12 @@ def main():
         default=0.01,
         help='Exponential decay rate for weighted average (higher = favor newer predictions more)'
     )
+    parser.add_argument(
+        '--skip-first-n-actions',
+        type=int,
+        default=0,
+        help='Number of first actions to skip from new_actions chunk (useful for discarding stale predictions)'
+    )
     
     # Parse known args to allow ROS args
     parsed_args, unknown = parser.parse_known_args()
@@ -1237,7 +1254,8 @@ def main():
             debug=parsed_args.debug,
             chunk_size_threshold=parsed_args.chunk_size_threshold,
             aggregate_fn_name=parsed_args.aggregate_fn,
-            aggregate_weight_decay=parsed_args.aggregate_weight_decay
+            aggregate_weight_decay=parsed_args.aggregate_weight_decay,
+            skip_first_n_actions=parsed_args.skip_first_n_actions
         )
         
         print("LeRobot ONNX Inference Node started (Approach Plate - Absolute - RHC/Smoothing)")
