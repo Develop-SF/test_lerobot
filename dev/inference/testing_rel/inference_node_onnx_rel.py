@@ -778,7 +778,7 @@ class InferenceNode(Node):
         if self.inference.input_mode != "vision_only":
             self.joint_state_sub = self.create_subscription(
                 JointState,
-                '/sync/joint_states',
+                '/sync/isaac_joint_states',
                 self.joint_state_callback,
                 sensor_qos
             )

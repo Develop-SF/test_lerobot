@@ -301,7 +301,7 @@ def open_file_dialog(is_dir=False, initial_dir=None):
 
 # --- Task Command Generators ---
 
-def generate_convert_cmd(rosbag_path, base_output_dir, system_setup, dataset_name, input_mode, output_mode, fps, obs_topics, act_topics, force):
+def generate_convert_cmd(rosbag_path, base_output_dir, system_setup, dataset_name, input_mode, output_mode, fps, obs_topics, act_topics, num_workers, force):
     script = "rosbag_to_lerobot_rosbag2.py"
     if "7-DoF" in system_setup:
         script = "rosbag_to_lerobot_rosbag2_7DoF.py"
@@ -319,6 +319,7 @@ def generate_convert_cmd(rosbag_path, base_output_dir, system_setup, dataset_nam
         "--dataset-name", dataset_name,
         "--input-mode", input_mode,
         "--output-mode", output_mode,
+        "--num-workers", str(int(num_workers)),
     ]
     
     # Topics
@@ -335,11 +336,12 @@ def generate_convert_cmd(rosbag_path, base_output_dir, system_setup, dataset_nam
     if force:
         cmd.append("--force")
     
+    # Always pass FPS parameter
+    cmd.extend(["--fps", str(fps)])
+    
     if "7-DoF" in system_setup:
         # Use dataset_name for task name as requested
         cmd.extend(["--task", dataset_name])
-    else:
-        cmd.extend(["--fps", str(fps)])
         
     return cmd
 
@@ -465,6 +467,10 @@ def build_ui():
                             fps_slider = gr.Slider(1, 60, value=20, label="FPS")
                         
                         with gr.Row():
+                            num_workers_slider = gr.Slider(1, 16, value=4, step=1, label="Parallel Workers")
+                            gr.Markdown("⚠️ **Warning:** Higher values speed up conversion but use more RAM. Each worker loads one episode into memory.")
+                        
+                        with gr.Row():
                             btn_start_convert = gr.Button("🚀 Start Conversion", variant="primary")
                             btn_stop_convert = gr.Button("⏹️ Stop Conversion", variant="stop")
                         convert_status = gr.Textbox(label="Submission Status")
@@ -486,7 +492,7 @@ def build_ui():
                         
                         btn_browse_rosbag.click(on_browse_rosbag, outputs=[rosbag_path])
                         
-                        def on_convert(rosbag_dir, od, st, dn, im, om, fps, obs, act, progress=gr.Progress()):
+                        def on_convert(rosbag_dir, od, st, dn, im, om, fps, obs, act, num_workers, progress=gr.Progress()):
                             if not rosbag_dir:
                                 yield "Error: No rosbag path specified."; return
                             if not os.path.exists(rosbag_dir):
@@ -514,7 +520,7 @@ def build_ui():
                                 else:
                                     yield f"Conversion aborted."; return
                                 
-                            cmd = generate_convert_cmd(rosbag_dir, od, st, dn, im, om, fps, obs, act, force)
+                            cmd = generate_convert_cmd(rosbag_dir, od, st, dn, im, om, fps, obs, act, num_workers, force)
                             job_id = SCHEDULER.submit_job(f"Convert_{dn}", cmd)
                             if not job_id:
                                 yield "Queue Full!"; return
@@ -548,7 +554,7 @@ def build_ui():
                         
                         btn_start_convert.click(
                             on_convert, 
-                            [rosbag_path, output_convert, system_type, dataset_name, input_mode, output_mode, fps_slider, obs_topics, act_topics], 
+                            [rosbag_path, output_convert, system_type, dataset_name, input_mode, output_mode, fps_slider, obs_topics, act_topics, num_workers_slider], 
                             [convert_status]
                         )
                         btn_stop_convert.click(stop_active_job_ui, outputs=[convert_status])
