@@ -644,6 +644,52 @@ class ROSBag2ConverterCroppedTrimmed:
                 print(f"❌ No frames remaining after trimming")
                 return None, None, False
             
+            # Extract original timestamps from the first available topic in each frame
+            original_timestamps = []
+            for frame_data in trimmed_frames:
+                # Get timestamp from first available topic
+                first_msg_timestamp = next(iter(frame_data.values()))[1]  # (msg, timestamp)
+                # Convert ROS nanosecond timestamp to seconds
+                original_timestamps.append(first_msg_timestamp / 1e9)
+            
+            # Resample frames to match target FPS based on original timestamps
+            if len(original_timestamps) > 1:
+                start_time = original_timestamps[0]
+                end_time = original_timestamps[-1]
+                duration = end_time - start_time
+                
+                # Generate target timestamps at the desired FPS
+                target_dt = 1.0 / self.fps
+                target_timestamps = []
+                t = start_time
+                while t <= end_time:
+                    target_timestamps.append(t)
+                    t += target_dt
+                
+                # For each target timestamp, find the closest original frame
+                selected_indices = []
+                for target_t in target_timestamps:
+                    # Find index of closest original timestamp
+                    closest_idx = min(range(len(original_timestamps)), 
+                                     key=lambda i: abs(original_timestamps[i] - target_t))
+                    selected_indices.append(closest_idx)
+                
+                # Remove duplicates while preserving order
+                seen = set()
+                unique_indices = []
+                for idx in selected_indices:
+                    if idx not in seen:
+                        seen.add(idx)
+                        unique_indices.append(idx)
+                
+                # Filter trimmed frames to only selected indices
+                trimmed_frames = [trimmed_frames[i] for i in unique_indices]
+                
+                print(f"📉 Resampled: {len(original_timestamps)} → {len(trimmed_frames)} frames "
+                      f"(duration: {duration:.2f}s, target FPS: {self.fps})")
+            else:
+                print(f"⚠️ Only {len(original_timestamps)} frame(s), skipping resampling")
+            
             # Generate regular timestamps
             regular_timestamps = self.create_regular_timestamps(len(trimmed_frames))
             
@@ -827,76 +873,83 @@ class ROSBag2ConverterCroppedTrimmed:
             
             print(f"\n📊 Will process {len(bags_to_process)} bags with {num_workers} workers")
             
-            # PHASE 1: Parallel extraction of frames from bags
+            # Process bags in batches to prevent out-of-memory issues
             print(f"\n{'='*60}")
-            print(f"📊 PHASE 1: Extracting frames from bags (parallel)")
+            print(f"📊 BATCH PROCESSING: {num_workers} bags per batch")
             print(f"{'='*60}")
             
-            extracted_frames = {}
-            
-            # Create extraction tasks
-            extraction_tasks = [
-                (bag_path, original_episode_index) 
-                for _, bag_path, original_episode_index in bags_to_process
-            ]
-            
-            # Run parallel extraction using thread pool
-            with ThreadPoolExecutor(max_workers=num_workers) as executor:
-                futures = {}
-                for bag_path, original_episode_index in extraction_tasks:
-                    future = executor.submit(self._extract_bag_worker, bag_path, original_episode_index)
-                    futures[future] = (bag_path, original_episode_index)
-                
-                # Collect results as they complete
-                successful_extractions = 0
-                for future in as_completed(futures):
-                    bag_path, original_episode_index = futures[future]
-                    try:
-                        frames_data, timestamps, success = future.result()
-                        if success:
-                            extracted_frames[bag_path] = (frames_data, timestamps, original_episode_index)
-                            successful_extractions += 1
-                            print(f"✅ Extracted: {Path(bag_path).name} ({len(frames_data)} frames)")
-                        else:
-                            print(f"❌ Failed to extract: {Path(bag_path).name}")
-                    except Exception as e:
-                        print(f"❌ Error extracting {Path(bag_path).name}: {e}")
-                        import traceback
-                        traceback.print_exc()
-            
-            print(f"\n✅ Extraction phase complete: {successful_extractions}/{len(extraction_tasks)} bags")
-            
-            # PHASE 2: Sequential writing to dataset (must be done in order)
-            print(f"\n{'='*60}")
-            print(f"💾 PHASE 2: Writing frames to dataset (sequential)")
-            print(f"{'='*60}")
+            total_bags = len(bags_to_process)
+            batch_size = num_workers
+            num_batches = (total_bags + batch_size - 1) // batch_size  # Ceiling division
             
             successful_writes = 0
-            total_episodes_to_write = len(extracted_frames)
-            for i, (bag_path, original_episode_index) in enumerate(extraction_tasks):
-                if bag_path not in extracted_frames:
-                    print(f"⏭️ Skipping {Path(bag_path).name} (extraction failed)")
-                    continue
+            
+            for batch_idx in range(num_batches):
+                batch_start = batch_idx * batch_size
+                batch_end = min(batch_start + batch_size, total_bags)
+                batch_bags = bags_to_process[batch_start:batch_end]
                 
-                frames_data, timestamps, _ = extracted_frames[bag_path]
+                print(f"\n{'='*60}")
+                print(f"🔄 BATCH {batch_idx + 1}/{num_batches}: Processing bags {batch_start + 1}-{batch_end}")
+                print(f"{'='*60}")
                 
-                print(f"\n--- 💾 Writing {successful_writes + 1}/{total_episodes_to_write} ({Path(bag_path).name}) ---")
+                # PHASE 1: Parallel extraction for this batch
+                print(f"📊 Extracting frames from {len(batch_bags)} bags (parallel)...")
+                extracted_frames = {}
                 
-                try:
-                    if self._write_episode_worker(frames_data, timestamps, original_episode_index, bag_path):
-                        successful_writes += 1
-                        # Release memory by deleting processed frames
-                        del extracted_frames[bag_path]
-                except Exception as e:
-                    print(f"❌ Error writing {bag_path}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    continue
+                with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                    futures = {}
+                    for _, bag_path, original_episode_index in batch_bags:
+                        future = executor.submit(self._extract_bag_worker, bag_path, original_episode_index)
+                        futures[future] = (bag_path, original_episode_index)
+                    
+                    # Collect results as they complete
+                    successful_extractions = 0
+                    for future in as_completed(futures):
+                        bag_path, original_episode_index = futures[future]
+                        try:
+                            frames_data, timestamps, success = future.result()
+                            if success:
+                                extracted_frames[bag_path] = (frames_data, timestamps, original_episode_index)
+                                successful_extractions += 1
+                                print(f"✅ Extracted: {Path(bag_path).name} ({len(frames_data)} frames)")
+                            else:
+                                print(f"❌ Failed to extract: {Path(bag_path).name}")
+                        except Exception as e:
+                            print(f"❌ Error extracting {Path(bag_path).name}: {e}")
+                            import traceback
+                            traceback.print_exc()
+                
+                print(f"✅ Batch extraction complete: {successful_extractions}/{len(batch_bags)} bags")
+                
+                # PHASE 2: Sequential writing for this batch
+                print(f"💾 Writing {len(extracted_frames)} episodes to dataset...")
+                
+                for _, bag_path, original_episode_index in batch_bags:
+                    if bag_path not in extracted_frames:
+                        print(f"⏭️ Skipping {Path(bag_path).name} (extraction failed)")
+                        continue
+                    
+                    frames_data, timestamps, _ = extracted_frames[bag_path]
+                    
+                    print(f"\n--- 💾 Writing episode {self.episode_index} ({Path(bag_path).name}) ---")
+                    try:
+                        if self._write_episode_worker(frames_data, timestamps, original_episode_index, bag_path):
+                            successful_writes += 1
+                    except Exception as e:
+                        print(f"❌ Error writing {bag_path}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        continue
+                
+                # Clear batch data from memory
+                extracted_frames.clear()
+                print(f"🧹 Batch {batch_idx + 1} complete, memory cleared")
             
             print(f"\n{'='*60}")
             print(f"🎉 Conversion Complete!")
             print(f"{'='*60}")
-            print(f"Successfully converted: {successful_writes}/{len(extraction_tasks)} bag files")
+            print(f"Successfully converted: {successful_writes}/{total_bags} bag files")
             print(f"Skipped episodes: {sorted(list(self.skip_episodes))}")
             
             # Save episode mapping

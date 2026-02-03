@@ -418,6 +418,9 @@ def create_out_input(label, value=None):
     return gr.Textbox(label=label, value=value)
 
 def build_ui():
+    # Calculate max workers based on CPU count (80% of available cores)
+    max_workers = max(1, int(0.8 * os.cpu_count()))
+    
     with gr.Blocks(theme=gr.themes.Soft(), title="LeRobot Training GUI") as app:
         
         with gr.Row(variant="panel"):
@@ -467,8 +470,8 @@ def build_ui():
                             fps_slider = gr.Slider(1, 60, value=20, label="FPS")
                         
                         with gr.Row():
-                            num_workers_slider = gr.Slider(1, 16, value=4, step=1, label="Parallel Workers")
-                            gr.Markdown("⚠️ **Warning:** Higher values speed up conversion but use more RAM. Each worker loads one episode into memory.")
+                            num_workers_slider = gr.Slider(1, max_workers, value=min(4, max_workers), step=1, label="Parallel Workers")
+                            gr.Markdown(f"⚠️ **Warning:** Higher values speed up conversion but use more RAM. Each worker loads one episode into memory. (Max: {max_workers} = 80% of {os.cpu_count()} cores)")
                         
                         with gr.Row():
                             btn_start_convert = gr.Button("🚀 Start Conversion", variant="primary")
