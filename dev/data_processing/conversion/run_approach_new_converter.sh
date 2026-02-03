@@ -8,8 +8,8 @@ eval "$(conda shell.bash hook)"
 conda activate lerobot
 
 # Configuration
-BASE_DIR="/mnt/SF-Shared/rosbags/20251222_eric_plating_v2"
-OUTPUT_DIR="/mnt/SF-Shared/dataset/robot_learning/lerobot/eric_plating_v2"
+BASE_DIR="/mnt/nas/rosbags/20251222_eric_plating_v2"
+OUTPUT_DIR="/mnt/nas/dataset/robot_learning/lerobot/eric_plating_v2"
 
 # Number of parallel workers for bag extraction
 # Default: 1 (sequential, memory-safe)

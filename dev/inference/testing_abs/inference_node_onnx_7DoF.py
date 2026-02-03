@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """
 ROS2 Inference Node for LeRobot Deployment - Approach Plate (ONNX+TensorRT)
-Relative Action Mode
+Absolute Action Mode
 
 This node subscribes to sensor topics, runs inference using ONNX Runtime with TensorRT,
 and publishes actions.
 
 Includes image preprocessing matching the training pipeline:
-- Top view (head camera): Crop (260, 135, 178, 224) → Rotate 90° CW → 224×178
-- Left arm camera: Resize to 224×178
-
-Supports Relative Action Representation (PD2.1 + PD2.2)
+- All cameras: Resize to 320×180 (no cropping or rotation for 7DoF model)
 """
 
 import sys
@@ -38,29 +35,20 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import CompressedImage, JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from std_msgs.msg import Header
+from control_msgs.msg import GripperCommand
 
 
 class ONNXTensorRTInference:
-    """
-    ONNX Runtime with TensorRT backend inference for Approach Real Bing 20Hz model (Relative).
-    
-    This class handles:
-    1. Loading ONNX models (RGB Encoder, UNet) with TensorRT optimization.
-    2. Image preprocessing (Crop, Rotate, Resize, Normalize).
-    3. State normalization and relative action handling.
-    4. Denoising loop using DDIM scheduler.
-    5. Action unnormalization and conversion from relative to absolute.
-    """
+    """ONNX Runtime with TensorRT backend inference for Approach Real Bing 20Hz model (Absolute)."""
     
     def __init__(self, checkpoint_path: str, onnx_dir: str, device: str = "cuda", debug_dir: Optional[Path] = None):
         """
         Initialize the ONNX+TensorRT inference system.
         
         Args:
-            checkpoint_path: Path to original model checkpoint (used for loading normalization stats).
-            onnx_dir: Path to directory containing ONNX models (unet.onnx, rgb_encoder.onnx) and config.
-            device: Device for inference ("cuda" or "cpu").
-            debug_dir: Optional directory to save debug data (images, states, actions).
+            checkpoint_path: Path to original model checkpoint (for normalization stats)
+            onnx_dir: Path to ONNX models directory
+            device: Device for inference ("cuda" or "cpu")
         """
         self.device = device
         self.checkpoint_path = Path(checkpoint_path)
@@ -73,10 +61,6 @@ class ONNXTensorRTInference:
         with open(config_path, 'r') as f:
             self.config = json.load(f)
         
-        # Load relative action settings
-        self.use_relative_actions = self.config.get("use_relative_actions", False)
-        self.arm_dim = self.config.get("arm_dim", 6)
-        
         # Load image_features from the original model config to determine camera order
         self._load_image_features_config()
         
@@ -88,9 +72,6 @@ class ONNXTensorRTInference:
         print(f"  State dim: {self.config['state_dim']}")
         print(f"  Inference steps: {self.config['num_inference_steps']}")
         print(f"  Scheduler: {self.config['noise_scheduler_type']}")
-        print(f"  Relative actions: {self.use_relative_actions}")
-        if self.use_relative_actions:
-            print(f"    Arm dim: {self.arm_dim}")
         
         # Setup ONNX Runtime sessions with TensorRT
         self._setup_onnx_sessions()
@@ -101,9 +82,9 @@ class ONNXTensorRTInference:
         # Setup normalization
         self._setup_normalization()
         
-        # Image preprocessing parameters (from training pipeline/lerobot_inference.py)
-        self.crop_box = (260, 135, 178, 224)  # (x, y, w, h) for top view (head camera)
-        self.target_size = (224, 178)  # (width, height) for both cameras
+        # Image preprocessing parameters - 7DOF model uses 180x320 images without cropping
+        self.crop_box = None  # No crop for 7DOF
+        self.target_size = (320, 180)  # (width, height) - model expects 180x320
         
         # Setup center crop if needed (for ONNX encoder)
         if self.config.get('crop_shape'):
@@ -111,14 +92,16 @@ class ONNXTensorRTInference:
         else:
             self.center_crop = None
 
-        # Left arm joint names
-        self.left_arm_joints = [
-            'la_shoulder_pan_joint',
-            'la_shoulder_lift_joint',
-            'la_elbow_joint',
-            'la_wrist_1_joint',
-            'la_wrist_2_joint',
-            'la_wrist_3_joint'
+        # Right arm joint names (7DOF configuration) - MUST MATCH DATASET CONVERSION ORDER
+        # Dataset order from rosbag_to_lerobot_rosbag2_7DoF.py: gripper at index 5, wrist_3 at index 6
+        self.right_arm_joints = [
+            'ra_shoulder_pan_joint',
+            'ra_shoulder_lift_joint',
+            'ra_elbow_joint',
+            'ra_wrist_1_joint',
+            'ra_wrist_2_joint',
+            'ra_robotiq_85_left_knuckle_joint',  # gripper (index 5 in dataset)
+            'ra_wrist_3_joint'                    # wrist_3 (index 6 in dataset)
         ]
         
         # Observation and action queues (matching DiffusionPolicy.reset())
@@ -129,12 +112,11 @@ class ONNXTensorRTInference:
         }
         
         print(f"\nImage preprocessing:")
-        print(f"  - Head camera: Crop {self.crop_box} → Rotate 90° CW → {self.target_size}")
-        print(f"  - Left arm camera: Resize to {self.target_size}")
+        print(f"  - All cameras: Resize to {self.target_size}")
         
         # Metadata for ROS node
         self.input_mode = "vision_pos" # Assuming vision + position based on model structure
-        self.output_mode = "pos_only" # Assuming position only output
+        self.output_mode = "pos_only" # 7DOF outputs position only (7 joints)
     
     def reset(self):
         """Clear observation and action queues."""
@@ -221,9 +203,9 @@ class ONNXTensorRTInference:
             model_config = json.load(f)
         
         # HARDCODED ORDER TO MATCH PYTORCH VERSION
-        # PyTorch uses insertion order of the dict, which happens to be [left, head] for this model
+        # 7DOF model uses front and head cameras
         self.image_features = [
-            'observation.images.sync_left_arm_cam',
+            'observation.images.sync_front_cam',
             'observation.images.sync_head_cam'
         ]
         print(f"  ✓ Loaded image features order (HARDCODED): {self.image_features}")
@@ -233,8 +215,8 @@ class ONNXTensorRTInference:
         for key in self.image_features:
             if 'head' in key:
                 self.camera_key_map['head'] = key
-            elif 'left' in key:
-                self.camera_key_map['left'] = key
+            elif 'front' in key or 'left' in key:
+                self.camera_key_map['front'] = key  # 'front' key for front camera
         
         print(f"  ✓ Camera key map: {self.camera_key_map}")
     
@@ -252,12 +234,7 @@ class ONNXTensorRTInference:
         
         # Load the policy to extract normalization stats
         print(f"  Loading policy to extract normalization stats...")
-        # IMPORTANT: Load with use_relative_actions=True if needed, to ensure correct stats loading
-        policy = DiffusionPolicy.from_pretrained(
-            str(model_path),
-            use_relative_actions=self.use_relative_actions,
-            arm_dim=self.arm_dim
-        )
+        policy = DiffusionPolicy.from_pretrained(str(model_path))
         
         self.norm_stats = {}
         self.unnorm_stats = {}
@@ -320,7 +297,7 @@ class ONNXTensorRTInference:
         print(f"  Unnormalization stats keys: {list(self.unnorm_stats.keys())}")
     
     def decode_compressed_image_msg(self, compressed_msg, is_top_view: bool = False) -> np.ndarray:
-        """Decode ROS CompressedImage message to RGB array with preprocessing."""
+        """Decode ROS CompressedImage message to RGB array and resize to model input size."""
         np_arr = np.frombuffer(compressed_msg.data, np.uint8)
         image_bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
         
@@ -329,31 +306,31 @@ class ONNXTensorRTInference:
         
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         
-        if is_top_view:
-            # Head camera (top view): Crop FIRST, then rotate
-            x, y, w, h = self.crop_box
-            image_cropped = image_rgb[y:y+h, x:x+w]
-            image_processed = cv2.rotate(image_cropped, cv2.ROTATE_90_CLOCKWISE)
-        else:
-            # Left arm camera: Resize
-            image_processed = cv2.resize(image_rgb, self.target_size, interpolation=cv2.INTER_AREA)
+        # 7DOF model: simply resize to target size (no cropping or rotation)
+        image_processed = cv2.resize(image_rgb, self.target_size, interpolation=cv2.INTER_AREA)
         
         return image_processed
     
     def extract_joint_positions_msg(self, joint_state_msg) -> np.ndarray:
-        """Extract left arm joint positions from ROS JointState message."""
+        """Extract right arm joint positions (7 joints) from ROS JointState message."""
         joint_names = list(joint_state_msg.name)
         positions = np.array(joint_state_msg.position, dtype=np.float32)
         
-        left_arm_indices = []
-        for joint_name in self.left_arm_joints:
+        # Extract positions in correct 7DOF order matching dataset
+        ordered_positions = []
+        for joint_name in self.right_arm_joints:
             if joint_name in joint_names:
-                left_arm_indices.append(joint_names.index(joint_name))
+                idx = joint_names.index(joint_name)
+                ordered_positions.append(positions[idx])
+            else:
+                # If a joint is missing, use 0 (shouldn't happen for valid data)
+                print(f"Warning: Joint {joint_name} not found in joint_states")
+                ordered_positions.append(0.0)
         
-        if len(left_arm_indices) != 6:
-            raise ValueError(f"Expected 6 left arm joints, found {len(left_arm_indices)}")
+        if len(ordered_positions) != 7:
+            raise ValueError(f"Expected 7 right arm joints (6 arm + gripper), found {len(ordered_positions)}")
         
-        return positions[left_arm_indices]
+        return np.array(ordered_positions, dtype=np.float32)
     
     def preprocess_image(self, image: np.ndarray) -> np.ndarray:
         """Preprocess image for model input (CHW format, normalized)."""
@@ -374,31 +351,50 @@ class ONNXTensorRTInference:
                 max_val = stats["max"]
                 state = (state - min_val) / (max_val - min_val + 1e-8)
                 state = state * 2 - 1  # Scale to [-1, 1]
-            elif stats.get("mode") == "mean_std":
-                mean = stats["mean"]
-                std = stats["std"]
-                state = (state - mean) / (std + 1e-8)
         return state
     
-    def _normalize_image(self, image: np.ndarray) -> np.ndarray:
-        """Normalize image observation."""
-        # Try different possible keys (with both underscores and periods)
-        possible_keys = [
-            "observation.image",
-            "observation.images.sync_left_arm_cam",
-            "observation.images.sync.left.arm.cam",
-            "observation.images.sync_head_cam",
-            "observation.images.sync.head.cam"
-        ]
+    def _normalize_image(self, image: np.ndarray, camera_key: str) -> np.ndarray:
+        """
+        Normalize image observation using camera-specific stats.
         
-        for key in possible_keys:
-            if key in self.norm_stats:
-                stats = self.norm_stats[key]
-                if stats.get("mode") == "mean_std":
-                    mean = stats["mean"].reshape(3, 1, 1)
-                    std = stats["std"].reshape(3, 1, 1)
-                    image = (image - mean) / (std + 1e-8)
-                break
+        Args:
+            image: Image array (C, H, W)
+            camera_key: Camera key from config (e.g., 'observation.images.sync_front_cam')
+        
+        Returns:
+            Normalized image
+        """
+        # Try the exact key first
+        if camera_key in self.norm_stats:
+            stats = self.norm_stats[camera_key]
+            if stats.get("mode") == "mean_std":
+                mean = stats["mean"].reshape(3, 1, 1)
+                std = stats["std"].reshape(3, 1, 1)
+                image = (image - mean) / (std + 1e-8)
+                return image
+        
+        # Try converting underscores to dots
+        alt_key = camera_key.replace('_', '.')
+        if alt_key in self.norm_stats:
+            stats = self.norm_stats[alt_key]
+            if stats.get("mode") == "mean_std":
+                mean = stats["mean"].reshape(3, 1, 1)
+                std = stats["std"].reshape(3, 1, 1)
+                image = (image - mean) / (std + 1e-8)
+                return image
+        
+        # Try converting dots to underscores
+        alt_key = camera_key.replace('.', '_')
+        if alt_key in self.norm_stats:
+            stats = self.norm_stats[alt_key]
+            if stats.get("mode") == "mean_std":
+                mean = stats["mean"].reshape(3, 1, 1)
+                std = stats["std"].reshape(3, 1, 1)
+                image = (image - mean) / (std + 1e-8)
+                return image
+        
+        print(f"Warning: No normalization stats found for {camera_key}")
+        print(f"Available keys: {list(self.norm_stats.keys())}")
         return image
     
     def _unnormalize_action(self, action: np.ndarray) -> np.ndarray:
@@ -411,10 +407,6 @@ class ONNXTensorRTInference:
                 min_val = stats["min"]
                 max_val = stats["max"]
                 action = action * (max_val - min_val) + min_val
-            elif stats.get("mode") == "mean_std":
-                mean = stats["mean"]
-                std = stats["std"]
-                action = action * (std + 1e-8) + mean
         return action
     
     def _encode_images(self, images: np.ndarray) -> np.ndarray:
@@ -452,49 +444,41 @@ class ONNXTensorRTInference:
         
         return features
     
-    def predict(self, left_image, head_image, joint_state) -> np.ndarray:
+    def predict(self, front_image, head_image, joint_state) -> np.ndarray:
         """
         Run inference on preprocessed inputs.
         
-        This method:
-        1. Preprocesses images (HWC -> CHW, Normalize).
-        2. Updates observation queues.
-        3. Prepares batches for inference.
-        4. Handles relative state conversion (Absolute -> Relative).
-        5. Runs the diffusion inference loop.
-        6. Converts predicted relative actions back to absolute actions.
-        
         Args:
-            left_image: Left arm camera image (H, W, 3) RGB.
-            head_image: Head camera image (H, W, 3) RGB.
-            joint_state: Joint positions (6,).
+            front_image: Front camera image (H, W, 3) RGB - should be 320x180
+            head_image: Head camera image (H, W, 3) RGB - should be 320x180
+            joint_state: Joint positions (7,) including gripper
             
         Returns:
-            Action array (6,) representing the next target joint position.
+            Action array (7,) - 6 arm joints + gripper
         """
         # Preprocess images (HWC -> CHW, [0,1])
-        left_processed = self.preprocess_image(left_image)
+        front_processed = self.preprocess_image(front_image)
         head_processed = self.preprocess_image(head_image)
         
-        # Normalize images
-        left_normalized = self._normalize_image(left_processed)
-        head_normalized = self._normalize_image(head_processed)
-        
-        # Map normalized images to their config keys
+        # Map images to their config keys and normalize with camera-specific stats
         batch_images = {}
-        if 'left' in self.camera_key_map:
-            batch_images[self.camera_key_map['left']] = left_normalized
+        if 'front' in self.camera_key_map:
+            front_key = self.camera_key_map['front']
+            front_normalized = self._normalize_image(front_processed, front_key)
+            batch_images[front_key] = front_normalized
         if 'head' in self.camera_key_map:
-            batch_images[self.camera_key_map['head']] = head_normalized
+            head_key = self.camera_key_map['head']
+            head_normalized = self._normalize_image(head_processed, head_key)
+            batch_images[head_key] = head_normalized
             
         # Stack in the exact order defined by the model config
         images_stacked = np.stack([batch_images[key] for key in self.image_features], axis=0)
         
-        # CRITICAL: Keep state unnormalized for queue (to allow correct relative conversion)
-        state_stored = joint_state
+        # Normalize joint state
+        state_normalized = self._normalize_state(joint_state)
         
         # Populate queues
-        self._queues["observation.state"].append(state_stored)
+        self._queues["observation.state"].append(state_normalized)
         self._queues["observation.images"].append(images_stacked)
         
         # Generate actions if queue is empty
@@ -505,7 +489,7 @@ class ONNXTensorRTInference:
             
             # Pad with first observation if we don't have enough yet
             while len(state_list) < self.config['n_obs_steps']:
-                state_list.insert(0, state_list[0] if state_list else state_stored)
+                state_list.insert(0, state_list[0] if state_list else state_normalized)
                 images_list.insert(0, images_list[0] if images_list else images_stacked)
             
             # Only keep the last n_obs_steps
@@ -516,30 +500,8 @@ class ONNXTensorRTInference:
             state_batch = np.stack(state_list, axis=0)[np.newaxis, ...]
             images_batch = np.stack(images_list, axis=0)[np.newaxis, ...]
             
-            # Handle Relative Observations (PD2.2)
-            if self.use_relative_actions:
-                # 1. Convert unnormalized absolute state to unnormalized relative state
-                # Reference is the current state (last in sequence)
-                current_state = state_batch[:, -1:, :self.arm_dim]
-                # Subtract current state from all steps
-                state_batch[:, :, :self.arm_dim] = state_batch[:, :, :self.arm_dim] - current_state
-                
-                # 2. Normalize the relative state
-                state_batch = self._normalize_state(state_batch)
-            else:
-                # Absolute mode: Just normalize the absolute state
-                state_batch = self._normalize_state(state_batch)
-            
             # Run inference
             action_chunk_unnorm = self._run_inference(images_batch, state_batch)
-            
-            # Convert to Absolute (if relative)
-            if self.use_relative_actions:
-                # Use the state captured AT INFERENCE TIME (state_stored)
-                # state_stored is (state_dim,)
-                # Add it to the relative actions
-                # Broadcasting: (1, T, arm_dim) + (arm_dim,)
-                action_chunk_unnorm[:, :, :self.arm_dim] = action_chunk_unnorm[:, :, :self.arm_dim] + state_stored[:self.arm_dim]
             
             # Add to queue (now storing Absolute Unnormalized actions)
             self._queues["action"].extend(action_chunk_unnorm[0])
@@ -552,7 +514,7 @@ class ONNXTensorRTInference:
                     step_dir.mkdir(parents=True, exist_ok=True)
                     
                     # Save inputs
-                    cv2.imwrite(str(step_dir / "left_image.jpg"), cv2.cvtColor(left_image, cv2.COLOR_RGB2BGR))
+                    cv2.imwrite(str(step_dir / "front_image.jpg"), cv2.cvtColor(front_image, cv2.COLOR_RGB2BGR))
                     cv2.imwrite(str(step_dir / "head_image.jpg"), cv2.cvtColor(head_image, cv2.COLOR_RGB2BGR))
                     np.save(str(step_dir / "joint_state.npy"), joint_state)
                     
@@ -577,6 +539,8 @@ class ONNXTensorRTInference:
         Returns:
             action_chunk_unnorm: (B, T_action, D_action)
         """
+        inference_start = time.time()
+        
         n_obs_steps = state_batch.shape[1]
         
         # Encode images
@@ -636,6 +600,10 @@ class ONNXTensorRTInference:
         # action_chunk is (1, n_action_steps, action_dim)
         action_chunk_unnorm = self._unnormalize_action(action_chunk)
         
+        # Record inference time
+        inference_time = time.time() - inference_start
+        print(f"  Inference time: {inference_time:.4f}s")
+        
         return action_chunk_unnorm
 
     def _warmup(self, n_steps: int = 5):
@@ -648,11 +616,11 @@ class ONNXTensorRTInference:
         
         batch_size = 1
         n_obs_steps = self.config['n_obs_steps']
-        n_cameras = 2 # Left, Head
-        C, H, W = 3, 224, 224 # Wait, target size is (224, 178) -> (178, 224)?
+        n_cameras = 2  # Front, Head
+        C = 3
+        # target_size is (320, 180) (width, height)
         # preprocess_image does: transpose(image_normalized, (2, 0, 1)) -> (C, H, W)
-        # target_size is (224, 178) (width, height)
-        # So H=178, W=224
+        # So H=180, W=320
         H, W = self.target_size[1], self.target_size[0]
         state_dim = self.config['state_dim']
         
@@ -660,26 +628,27 @@ class ONNXTensorRTInference:
         dummy_state = np.random.rand(batch_size, n_obs_steps, state_dim).astype(np.float32)
         
         for i in range(n_steps):
-            print(f"Warmup step {i+1}/{n_steps}...")
-            self._run_inference(dummy_images, dummy_state)
+            _ = self._run_inference(dummy_images, dummy_state)
+            print(f"  Warmup step {i+1}/{n_steps} complete")
         
+        print("Warmup complete!")
 
 
-    def predict_from_ros_messages(self, left_compressed_msg, head_compressed_msg, joint_state_msg) -> np.ndarray:
+    def predict_from_ros_messages(self, front_compressed_msg, head_compressed_msg, joint_state_msg) -> np.ndarray:
         """
         Run inference from ROS messages using ONNX+TensorRT.
         
         Returns:
-            Action array (6,) for position output
+            Action array (7,) for 7DOF position output (6 arm joints + gripper)
         """
         # Decode images
-        left_image = self.decode_compressed_image_msg(left_compressed_msg, is_top_view=False)
+        front_image = self.decode_compressed_image_msg(front_compressed_msg, is_top_view=False)
         head_image = self.decode_compressed_image_msg(head_compressed_msg, is_top_view=True)
         
-        # Extract joint state
+        # Extract joint state (7 joints including gripper)
         joint_state = self.extract_joint_positions_msg(joint_state_msg)
         
-        return self.predict(left_image, head_image, joint_state)
+        return self.predict(front_image, head_image, joint_state)
 
 
 class InferenceNode(Node):
@@ -696,7 +665,7 @@ class InferenceNode(Node):
             inference_frequency: Continuous inference frequency (Hz)
             mode: Inference mode - 'continuous' or 'triggered'
         """
-        super().__init__('lerobot_inference_node_onnx_rel')
+        super().__init__('lerobot_inference_node_onnx')
         
         # Configuration
         self.mode = mode
@@ -726,12 +695,12 @@ class InferenceNode(Node):
         
         # Message storage (latest messages from each topic)
         self.latest_messages = {
-            'left_image': None,
+            'front_image': None,
             'head_image': None,
             'joint_state': None
         }
         self.latest_message_times = {
-            'left_image': 0.0,
+            'front_image': 0.0,
             'head_image': 0.0,
             'joint_state': 0.0
         }
@@ -759,10 +728,10 @@ class InferenceNode(Node):
         )
         
         # Setup subscribers based on model input mode
-        self.left_image_sub = self.create_subscription(
+        self.front_image_sub = self.create_subscription(
             CompressedImage,
-            '/sync/emily01/left_arm/color/image_raw/compressed',
-            self.left_image_callback,
+            '/sync/emily01/front/color/image_raw/compressed',
+            self.front_image_callback,
             sensor_qos
         )
         
@@ -786,23 +755,30 @@ class InferenceNode(Node):
         else:
             self.get_logger().info("Running in vision_only mode - no joint state subscription")
         
-        # Setup publisher
+        # Setup publisher - 7DOF uses right arm
         self.action_pub = self.create_publisher(
             JointTrajectory,
-            '/left_arm/joint_trajectory',
+            '/right_arm/joint_trajectory',
             control_qos
         )
         
-        self.get_logger().info("LeRobot ONNX Inference Node ready (Relative)")
-        self.get_logger().info(f"Image preprocessing: Top view crop {self.inference.crop_box} + rotate, Left arm resize to {self.inference.target_size}")
-    
-    def left_image_callback(self, msg: CompressedImage):
-        """Handle left arm camera messages."""
-        with self.message_lock:
-            self.latest_messages['left_image'] = msg
-            self.latest_message_times['left_image'] = time.time()
+        # Setup gripper publisher
+        self.gripper_pub = self.create_publisher(
+            GripperCommand,
+            '/right_gripper_cmd',
+            control_qos
+        )
         
-        # In triggered mode, trigger inference from left camera updates
+        self.get_logger().info("LeRobot ONNX Inference Node ready (7DOF)")
+        self.get_logger().info(f"Image preprocessing: No crop, simple resize to {self.inference.target_size}")
+    
+    def front_image_callback(self, msg: CompressedImage):
+        """Handle front camera messages."""
+        with self.message_lock:
+            self.latest_messages['front_image'] = msg
+            self.latest_message_times['front_image'] = time.time()
+        
+        # In triggered mode, trigger inference from front camera updates
         if self.mode == 'triggered':
             self.trigger_inference()
     
@@ -831,7 +807,7 @@ class InferenceNode(Node):
         # Get latest messages
         with self.message_lock:
             # Check for required messages based on model input mode
-            required_messages = ['left_image', 'head_image']
+            required_messages = ['front_image', 'head_image']
             if self.inference.input_mode != "vision_only":
                 required_messages.append('joint_state')
             
@@ -840,7 +816,7 @@ class InferenceNode(Node):
                 return
             
             # Copy messages for processing
-            left_msg = self.latest_messages['left_image']
+            front_msg = self.latest_messages['front_image']
             head_msg = self.latest_messages['head_image']
             joint_msg = self.latest_messages['joint_state'] if self.inference.input_mode != "vision_only" else None
         
@@ -848,7 +824,7 @@ class InferenceNode(Node):
         if not self.inference_running:
             threading.Thread(
                 target=self.run_inference_threaded,
-                args=(left_msg, head_msg, joint_msg),
+                args=(front_msg, head_msg, joint_msg),
                 daemon=True
             ).start()
     
@@ -889,14 +865,14 @@ class InferenceNode(Node):
                 # Get latest messages
                 with self.message_lock:
                     # Check for required messages based on model input mode
-                    required_messages = ['left_image', 'head_image']
+                    required_messages = ['front_image', 'head_image']
                     if self.inference.input_mode != "vision_only":
                         required_messages.append('joint_state')
                     
                     # Check if all required messages are available
                     if all(self.latest_messages[msg_type] is not None for msg_type in required_messages):
                         # Copy messages for processing
-                        left_msg = self.latest_messages['left_image']
+                        front_msg = self.latest_messages['front_image']
                         head_msg = self.latest_messages['head_image'] 
                         joint_msg = self.latest_messages['joint_state'] if self.inference.input_mode != "vision_only" else None
                         
@@ -904,7 +880,7 @@ class InferenceNode(Node):
                         if self.debug:
                             # Calculate latency: now - min(message_times)
                             # Only consider times for required messages
-                            msg_times = [self.latest_message_times['left_image'], self.latest_message_times['head_image']]
+                            msg_times = [self.latest_message_times['front_image'], self.latest_message_times['head_image']]
                             if self.inference.input_mode != "vision_only":
                                 msg_times.append(self.latest_message_times['joint_state'])
                             
@@ -921,7 +897,7 @@ class InferenceNode(Node):
                                 except Exception as e:
                                     self.get_logger().error(f"Failed to write to timing log: {e}")
 
-                        self.run_inference_synchronous(left_msg, head_msg, joint_msg)
+                        self.run_inference_synchronous(front_msg, head_msg, joint_msg)
                     else:
                         missing_msgs = [msg_type for msg_type in required_messages if self.latest_messages[msg_type] is None]
                         self.get_logger().debug(f"Waiting for messages: {missing_msgs}")
@@ -938,13 +914,13 @@ class InferenceNode(Node):
             else:
                 self.get_logger().warn(f"Inference loop running slower than {self.inference_frequency} Hz")
     
-    def run_inference_threaded(self, left_msg: CompressedImage, head_msg: CompressedImage, joint_msg: Optional[JointState]):
+    def run_inference_threaded(self, front_msg: CompressedImage, head_msg: CompressedImage, joint_msg: Optional[JointState]):
         """Run inference in a separate thread (for triggered mode)."""
         self.inference_running = True
         
         try:
             # Process ROS messages and run inference
-            action = self.inference.predict_from_ros_messages(left_msg, head_msg, joint_msg)
+            action = self.inference.predict_from_ros_messages(front_msg, head_msg, joint_msg)
             
             # Publish action as JointTrajectory
             self.publish_action(action)
@@ -956,14 +932,14 @@ class InferenceNode(Node):
             self.last_inference_time = time.time()
             self.inference_running = False
     
-    def run_inference_synchronous(self, left_msg: CompressedImage, head_msg: CompressedImage, joint_msg: Optional[JointState]):
+    def run_inference_synchronous(self, front_msg: CompressedImage, head_msg: CompressedImage, joint_msg: Optional[JointState]):
         """Run inference synchronously with the provided messages."""
         try:
             # Process ROS messages and run inference
             if self.debug:
                 start_time = time.perf_counter()
                 
-            action = self.inference.predict_from_ros_messages(left_msg, head_msg, joint_msg)
+            action = self.inference.predict_from_ros_messages(front_msg, head_msg, joint_msg)
             
             if self.debug:
                 inference_time = time.perf_counter() - start_time
@@ -986,47 +962,61 @@ class InferenceNode(Node):
             self.get_logger().error(f"Inference failed: {e}")
     
     def publish_action(self, action: np.ndarray):
-        """Publish action as JointTrajectory message."""
+        """Publish action as JointTrajectory message for 7DOF (6 arm + gripper)."""
         if action is None:
             return
-            
+        
+        # Extract positions based on model output mode
+        if self.inference.output_mode == "pos_only":
+            # Position-only output (7 joints)
+            if len(action) != 7:
+                raise ValueError(f"Expected 7D action for 7DOF pos_only mode, got {len(action)}D")
+            positions = action.astype(np.float64)
+            self.get_logger().debug(f"Position-only action (7DOF): {positions}")
+        elif self.inference.output_mode == "pos_vel":
+            # Position + velocity output (14 total: 7 pos + 7 vel)
+            if len(action) != 14:
+                raise ValueError(f"Expected 14D action for 7DOF pos_vel mode, got {len(action)}D")
+            positions = action[:7].astype(np.float64)
+            velocities = action[7:].astype(np.float64)
+            self.get_logger().debug(f"Position+velocity action (7DOF) - Pos: {positions}, Vel: {velocities}")
+        else:
+            raise ValueError(f"Unknown output mode: {self.inference.output_mode}")
+        
+        # Extract gripper value (index 5 in model output)
+        # Model output order: [shoulder_pan, shoulder_lift, elbow, wrist_1, wrist_2, GRIPPER, wrist_3]
+        gripper_value = float(positions[5])
+        
+        # Create and publish gripper command
+        gripper_msg = GripperCommand()
+        gripper_msg.position = gripper_value
+        gripper_msg.max_effort = 100.0  # Default max effort
+        self.gripper_pub.publish(gripper_msg)
+        self.get_logger().debug(f"Published gripper command: {gripper_value:.4f}")
+        
+        # Prepare arm trajectory (6 joints, removing gripper at index 5)
+        # Controller expects: [shoulder_pan, shoulder_lift, elbow, wrist_1, wrist_2, wrist_3]
+        arm_positions = np.concatenate([positions[:5], positions[6:7]]).tolist()
+        
         trajectory_msg = JointTrajectory()
         trajectory_msg.header = Header()
         trajectory_msg.header.stamp = self.get_clock().now().to_msg()
         trajectory_msg.header.frame_id = "base_link"
         
-        # Set joint names for left arm
+        # Set joint names for right arm (6 joints without gripper)
         trajectory_msg.joint_names = [
-            'la_shoulder_pan_joint',
-            'la_shoulder_lift_joint', 
-            'la_elbow_joint',
-            'la_wrist_1_joint',
-            'la_wrist_2_joint',
-            'la_wrist_3_joint'
+            'ra_shoulder_pan_joint',
+            'ra_shoulder_lift_joint', 
+            'ra_elbow_joint',
+            'ra_wrist_1_joint',
+            'ra_wrist_2_joint',
+            'ra_wrist_3_joint'
         ]
-        
-        # Handle action based on model output mode
-        if self.inference.output_mode == "pos_only":
-            # Position-only output
-            if len(action) != 6:
-                raise ValueError(f"Expected 6D action for pos_only mode, got {len(action)}D")
-            positions = action.astype(np.float64).tolist()
-            velocities = [0.0] * 6  # Zero velocities for position-only control
-            self.get_logger().debug(f"Position-only action: {positions}")
-        elif self.inference.output_mode == "pos_vel":
-            # Position + velocity output
-            if len(action) != 12:
-                raise ValueError(f"Expected 12D action for pos_vel mode, got {len(action)}D")
-            positions = action[:6].astype(np.float64).tolist()
-            velocities = action[6:].astype(np.float64).tolist()
-            self.get_logger().debug(f"Position+velocity action - Pos: {positions}, Vel: {velocities}")
-        else:
-            raise ValueError(f"Unknown output mode: {self.inference.output_mode}")
         
         # Create trajectory point
         point = JointTrajectoryPoint()
-        point.positions = positions
-        point.velocities = velocities
+        point.positions = arm_positions
+        # point.velocities = velocities  # Could add velocity support if needed
         point.accelerations = []  # Empty for position/velocity control
         point.effort = []  # Empty for position/velocity control
         point.time_from_start.sec = 0
@@ -1095,26 +1085,27 @@ def main():
             debug=parsed_args.debug
         )
         
-        print("LeRobot ONNX Inference Node started (Approach Plate - Relative Action Mode)")
+        print("LeRobot ONNX Inference Node started (7DOF Pick & Place)")
         print("Subscribing to:")
-        print("  - /sync/emily01/left_arm/color/image_raw/compressed")
+        print("  - /sync/emily01/front/color/image_raw/compressed")
         print("  - /sync/emily01/head/color/image_raw/compressed")
         if node.inference.input_mode != "vision_only":
             print("  - /sync/joint_states")
         print("Publishing to:")
-        print("  - /left_arm/joint_trajectory")
+        print("  - /right_arm/joint_trajectory (6 arm joints)")
+        print("  - /sns_right_gripper_cmd (gripper)")
         print(f"Inference mode: {parsed_args.mode}")
         print(f"Model modes - Input: {node.inference.input_mode}, Output: {node.inference.output_mode}")
         print(f"Image preprocessing:")
-        print(f"  - Top view: Crop {node.inference.crop_box} → Rotate 90° CW → {node.inference.target_size}")
-        print(f"  - Left arm: Resize to {node.inference.target_size}")
+        print(f"  - Front camera: Resize to {node.inference.target_size}")
+        print(f"  - Head camera: Resize to {node.inference.target_size}")
         
         if parsed_args.mode == 'continuous':
             print(f"Inference frequency: {parsed_args.frequency} Hz")
             # Start the continuous inference loop
             node.start_inference_loop()
         else:
-            print("Inference triggered by left camera topic updates (max 30 Hz)")
+            print("Inference triggered by front camera topic updates (max 30 Hz)")
         
         print("Press Ctrl+C to stop")
         

@@ -1,0 +1,10 @@
+tqdm
+numpy==1.26.4
+nvidia-ml-py
+torchcodec
+poetry-core
+pyarrow
+onnx
+onnxruntime-gpu
+matplotlib
+rerun-sdk

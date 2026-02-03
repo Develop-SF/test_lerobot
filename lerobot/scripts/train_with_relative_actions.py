@@ -321,7 +321,7 @@ def train_with_relative_actions(
     
     logging.info("Creating optimizer and scheduler")
     optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg_obj, policy)
-    grad_scaler = GradScaler(device.type, enabled=cfg_obj.policy.use_amp)
+    grad_scaler = GradScaler(enabled=cfg_obj.policy.use_amp)
     
     step = 0
     

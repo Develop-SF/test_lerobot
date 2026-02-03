@@ -5,9 +5,16 @@ Run ROS2 inference nodes to control the robot.
 ## Absolute (ONNX)
 
 ```bash
+# Standard
 python dev/inference/testing_abs/inference_node_onnx.py \
     --checkpoint /path/to/run_abs \
     --onnx-dir /path/to/run_abs/onnx_models \
+    --frequency 20.0
+
+# 7-DoF (Pick-N-Place)
+python3 dev/inference/testing_abs/inference_node_onnx_7DoF.py \
+    --checkpoint /mnt/nas/models/picknplace_7dof_diffusion/baseline \
+    --onnx-dir /mnt/nas/models/picknplace_7dof_diffusion/baseline/onnx \
     --frequency 20.0
 ```
 
@@ -23,8 +30,8 @@ python dev/inference/testing_rel/inference_node_onnx_rel.py \
 **Real example:**
 ```bash
 python dev/inference/testing_rel/inference_node_onnx_rel.py \
-    --checkpoint /mnt/SF-Shared/dataset/robot_learning/lerobot/eric_plating_v2/runs/eric_plating_v2_rel_2026-01-06_23-03-49/checkpoints/last \
-    --onnx-dir /mnt/SF-Shared/dataset/robot_learning/lerobot/eric_plating_v2/runs/eric_plating_v2_rel_2026-01-06_23-03-49/onnx_models \
+    --checkpoint /mnt/nas/dataset/robot_learning/lerobot/eric_plating_v2/runs/eric_plating_v2_rel_2026-01-06_23-03-49/checkpoints/last \
+    --onnx-dir /mnt/nas/dataset/robot_learning/lerobot/eric_plating_v2/runs/eric_plating_v2_rel_2026-01-06_23-03-49/onnx_models \
     --frequency 20.0
 ```
 
