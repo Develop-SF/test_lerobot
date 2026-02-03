@@ -799,7 +799,7 @@ class InferenceNode(Node):
 
         # Setup publisher
         self.action_pub = self.create_publisher(
-            TwistStamped, "/la/servo_node/delta_twist_cmds", control_qos
+            TwistStamped, "/la/servo_node/delta_twist_cmds_inference", control_qos
         )
 
         self.get_logger().info("LeRobot ONNX Inference Node ready")
